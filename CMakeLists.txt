@@ -22,7 +22,8 @@ set_target_properties(_mcswell_cpp PROPERTIES
 )
 
 target_include_directories(_mcswell_cpp PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src   # keep if you still include headers from src (ideally none)
 )
 
 target_link_libraries(_mcswell_cpp PRIVATE
