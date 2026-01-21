@@ -169,6 +169,7 @@ __global__ void run_gcmc_titration_kernel(
                 const bool ok = propose_perturbation_cloud(
                     oldw,
                     boundaries_xyz, boundaries_max,
+                    /*max_dist_to_cloud=*/0.5f,
                     &st,
                     dx, dy, dz,
                     ax, ay, az,
