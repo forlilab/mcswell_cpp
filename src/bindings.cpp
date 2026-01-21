@@ -7,9 +7,9 @@
 #include <array>
 #include <cstring>   // std::memcpy  (important on MSVC)
 
-#include "include/atom.hpp"
-#include "include/insertion_points.hpp"
-#include "include/run_mcswell.hpp"
+#include "atom.hpp"
+#include "insertion_points.hpp"
+#include "run_mcswell.hpp"
 
 namespace py = pybind11;
 

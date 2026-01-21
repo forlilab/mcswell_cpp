@@ -4,12 +4,12 @@
 #include <cstdio>
 #include <math_constants.h>
 
-#include "cuda_kernels.cuh"
-#include "consts.cuh"
-#include "cuda_rng.cuh"
-#include "water_ops.cuh"
-#include "water_model.cuh"
-#include "energy.cuh"
+#include "cuda/cuda_kernels.cuh"
+#include "cuda/consts.cuh"
+#include "cuda/cuda_rng.cuh"
+#include "cuda/water_ops.cuh"
+#include "cuda/water_model.cuh"
+#include "cuda/energy.cuh"
 
 static constexpr int BLOCK_THREADS = 512;
 

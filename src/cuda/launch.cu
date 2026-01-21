@@ -1,7 +1,7 @@
 #include <curand_kernel.h>
 
-#include "inlcude/cuda/launch.cuh"
-#include "include/cuda/cuda_kernels.cuh"
+#include "cuda/launch.cuh"
+#include "cuda/cuda_kernels.cuh"
 
 std::size_t dummy_rng_state_bytes() {
     return sizeof(curandStatePhilox4_32_10_t);

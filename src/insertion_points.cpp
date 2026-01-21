@@ -2,8 +2,8 @@
 #include <limits>
 #include <stdexcept>
 
-#include "include/insertion_points.hpp"
-#include "include/atom.hpp"
+#include "insertion_points.hpp"
+#include "atom.hpp"
 
 static inline double min_dist2_to_atoms(const std::array<double,3>& p,
                                         const std::vector<Atom>& atoms) {

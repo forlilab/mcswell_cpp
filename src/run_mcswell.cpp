@@ -9,11 +9,11 @@
 #include <string>
 #include <vector>
 
-#include "include/snapshots_io.hpp"
-#include "include/atom.hpp"
-#include "include/run_mcswell.hpp"
-#include "include/cuda/launch.cuh"
-#include "include/cuda/consts.cuh"
+#include "snapshots_io.hpp"
+#include "atom.hpp"
+#include "run_mcswell.hpp"
+#include "cuda/launch.cuh"
+#include "cuda/consts.cuh"
 
 namespace {
 inline void cuda_check(cudaError_t e, const char* what) {
