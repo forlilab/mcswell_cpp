@@ -10,11 +10,11 @@ find_package(CUDAToolkit REQUIRED)
 
 # ---- Python extension (note the leading underscore) ----
 pybind11_add_module(_mcswell_cpp
-    cpp/bindings.cpp
-    cpp/insertion_points.cpp
-    cpp/run_mcswell.cpp
-    cpp/cuda/cuda_kernels.cu
-    cpp/cuda/launch.cu
+    src/bindings.cpp
+    src/insertion_points.cpp
+    src/run_mcswell.cpp
+    src/cuda/cuda_kernels.cu
+    src/cuda/launch.cu
 )
 
 set_target_properties(_mcswell_cpp PROPERTIES
@@ -22,7 +22,7 @@ set_target_properties(_mcswell_cpp PROPERTIES
 )
 
 target_include_directories(_mcswell_cpp PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(_mcswell_cpp PRIVATE
