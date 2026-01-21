@@ -68,7 +68,6 @@ bool propose_perturbation_cloud(
     const float oldw[WATER_SIZE],
     const float* __restrict__ boundary_xyz, // [boundaries_max*3]
     uint32_t boundaries_max,
-    float max_dist_to_cloud,                // e.g. 0.5 Å
     curandStatePhilox4_32_10_t* st,
     float dx, float dy, float dz,
     float ax, float ay, float az, float angle_rad,
@@ -81,9 +80,6 @@ bool propose_perturbation_cloud(
     const float new_oy = oldw[OY] + dy;
     const float new_oz = oldw[OZ] + dz;
 
-    // Enforce “cloud” membership approximately:
-    // pick a random cloud point and require O is within radius.
-    // (If you instead want true nearest-neighbor, that needs a KD-tree / grid accel.)
     const uint32_t idx = (uint32_t)rand_int(st, (int)boundaries_max);
     const uint32_t bi = idx * 3;
     const float bx = boundary_xyz[bi+0];
@@ -95,7 +91,6 @@ bool propose_perturbation_cloud(
     const float ddz = new_oz - bz;
     const float d2 = ddx*ddx + ddy*ddy + ddz*ddz;
 
-    // Translate H positions first (as in Rust: h = old_h + delta)
     float3u h1 = make_float3u(neww[H1X] + dx, neww[H1Y] + dy, neww[H1Z] + dz);
     float3u h2 = make_float3u(neww[H2X] + dx, neww[H2Y] + dy, neww[H2Z] + dz);
 
