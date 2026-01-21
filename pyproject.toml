@@ -1,0 +1,14 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "pybind11>=2.11", "numpy"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "mcswell_cpp"
+version = "0.0.1"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+wheel.packages = ["python/mcswell_cpp"]
+cmake.minimum-version = "3.18"
+build.verbose = true

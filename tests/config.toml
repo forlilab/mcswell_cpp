@@ -1,0 +1,31 @@
+title = "TOML configuraiton file for MCSwell"
+
+[io]
+save_path="/data/MCSwell_C++/tests"
+
+[receptor]
+path=["/data/MCSwell_C++/tests/5pti.cif"]
+
+
+[simulation_parameters]
+# These parameters were optimized with a grid search
+n_frames=1
+n_snapshots=2000
+n_gcmc_steps=50000000
+n_equilibration_steps=5000000
+distance_cutoff=9.0
+
+[mu_range]
+start=-38.0
+stop=2.0
+step=1.0
+
+[simulation_box]
+#27.985094    9.3914385   0.24150422
+spacing=0.375
+center_x=27.985094
+center_y=9.3914385
+center_z=0.24150422
+x_size=24.0
+y_size=24.0
+z_size=24.0
