@@ -22,6 +22,8 @@ To change the water model used:
 As of now only TIP3P and TIP3FB water models are available.
 
 # Config file
+You can find an example of the configuration file in tests (config.toml)
+
 ## Configuration schema
 
 ### Top-level

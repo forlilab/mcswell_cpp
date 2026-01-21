@@ -28,3 +28,5 @@ static constexpr float STANDARD_VOLUME = 29.914f;
 static constexpr float BOLTZMANN_K = 0.0019872041; // Boltzmann constant (kcal/mol)
 static constexpr float TEMPERATURE = 300.; // Temperature used for Boltzmann sampling (K)
 static constexpr float BULK_WATER_DENSITY = 0.0334;
+static constexpr float EPSILON_RF = 80.0;
+static constexpr float RF_CUTOFF = 12.0;

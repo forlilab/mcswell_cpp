@@ -1,10 +1,15 @@
 title = "TOML configuraiton file for MCSwell"
 
 [io]
-save_path="/data/MCSwell_C++/tests"
+save_path="/data/phd/mcswell_cpp/tests"
 
 [receptor]
-path=["/data/MCSwell_C++/tests/5pti.cif"]
+path=["/data/phd/mcswell_cpp/tests/5pti.cif"]
+
+# This part is commented out as the test does not have a ligand
+# [ligand]
+# small_molecule_path=["3std_monomer_clean_ligand.sdf"]
+# small_molecule_forcefield=["gaff2"]
 
 
 [simulation_parameters]
@@ -19,6 +24,9 @@ distance_cutoff=9.0
 start=-38.0
 stop=2.0
 step=1.0
+
+[gci]
+peak_percentile=90.0
 
 [simulation_box]
 #27.985094    9.3914385   0.24150422

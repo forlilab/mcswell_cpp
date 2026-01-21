@@ -45,6 +45,25 @@ __host__ __device__ __forceinline__ T coulomb_energy(T q1, T q2, T r) {
     return k_e * (q1 * q2) / r;
 }
 
+template <typename T>
+__host__ __device__ __forceinline__ T coulomb_rf_energy(T q1, T q2, T r) {
+    const T k_e = static_cast<T>(332.0636);
+    // Reaction Field coefficients: (eps - 1) / (2 eps + 1)
+    const T kappa = (EPSILON_RF - static_cast<T>(1)) /
+                    (static_cast<T>(2) * EPSILON_RF * static_cast<T>(1));
+    const T inv_r = static_cast<T>(1) / r;
+    const T inv_rc = static_cast<T>(1) / RF_CUTOFF;
+
+    // r^2 / r_cut^3
+    const T rc2 = RF_CUTOFF * RF_CUTOFF;
+    const T inv_rc3 = static_cast<T>(1) / (rc2 * RF_CUTOFF);
+    const T r2_over_rc3 = (r * r) * inv_rc3;
+
+    // E = ke*q1*q2 [1/r + kapppa*r^2/rc^3 - (1+kappa)/rc]
+    const T bracket = inv_r + kappa * r2_over_rc3 - (static_cast<T>(1) + kappa) * inv_rc;
+    return k_e * (q1 * q2) * bracket;
+}
+
 __device__ __forceinline__
 float eval_energy_with_receptor(
     const float* __restrict__ receptor_atoms,   // [n_receptor*7]
@@ -87,12 +106,17 @@ float eval_energy_with_receptor(
             const float dist = sqrtf(r2);
             const float r_val = fmaxf(dist, 1e-8f);
 
+            // Trying to see if a distance cutoff works
             // LJ only if both are non-hydrogen (your convention: eps==0 => H)
-            if (t_eps != 0.0f && r_eps != 0.0f) {
-                partial += lennard_jones_rmin_half(t_eps, r_eps, r_val, t_rmin_half, r_rmin_half);
+            if (r_val <= RF_CUTOFF) {
+                if (t_eps != 0.0f && r_eps != 0.0f) {
+                    partial += lennard_jones_rmin_half(t_eps, r_eps, r_val, t_rmin_half, r_rmin_half);
+                }
+                partial += coulomb_rf_energy(t_q, r_q, r_val);
             }
+            
 
-            partial += coulomb_energy(t_q, r_q, r_val);
+            // partial += coulomb_energy(t_q, r_q, r_val);
         }
     }
 
@@ -145,7 +169,7 @@ float eval_energy_with_waters(
         const float wH2y = waters_compact[wb + 9];
         const float wH2z = waters_compact[wb + 10];
 
-        // Interact each atom of this water with each atom of target water, skipping self by resnum
+        // Interact each atom of this water with each atom of target water
         // Atom 0: Oxygen
         {
             const float w_x = wOx, w_y = wOy, w_z = wOz;
@@ -170,12 +194,14 @@ float eval_energy_with_waters(
                 const float r2=dx*dx+dy*dy+dz*dz;
                 const float r = fmaxf(sqrtf(r2), 1e-8f);
 
-                // if (t_res == wRes) continue;
-
-                if (t_eps != 0.0f) { // w is O so nonzero
-                    partial += lennard_jones_rmin_half(t_eps, w_eps, r, t_rminh, w_rminh);
+                if (r <= RF_CUTOFF) {
+                    if (t_eps != 0.0f) { // w is O so nonzero
+                        partial += lennard_jones_rmin_half(t_eps, w_eps, r, t_rminh, w_rminh);
+                    }
+                    partial += coulomb_rf_energy(t_q, w_q, r);
                 }
-                partial += coulomb_energy(t_q, w_q, r);
+                // partial += coulomb_energy(t_q, w_q, r);
+                // }
             }
         }
 
@@ -199,10 +225,11 @@ float eval_energy_with_waters(
                 const float r2=dx*dx+dy*dy+dz*dz;
                 const float r = fmaxf(sqrtf(r2), 1e-8f);
 
-                // if (t_res == wRes) continue;
-
                 // LJ skipped (H eps=0)
-                partial += coulomb_energy(t_q, w_q, r);
+                if (r <= RF_CUTOFF) {
+                    partial += coulomb_rf_energy(t_q, w_q, r);
+                }
+                // partial += coulomb_energy(t_q, w_q, r);
             }
         }
 
@@ -226,9 +253,10 @@ float eval_energy_with_waters(
                 const float r2=dx*dx+dy*dy+dz*dz;
                 const float r = fmaxf(sqrtf(r2), 1e-8f);
 
-                // if (t_res == wRes) continue;
-
-                partial += coulomb_energy(t_q, w_q, r);
+                if (r <= RF_CUTOFF) {
+                    partial += coulomb_rf_energy(t_q, w_q, r);
+                }
+                // partial += coulomb_energy(t_q, w_q, r);
             }
         }
     }
