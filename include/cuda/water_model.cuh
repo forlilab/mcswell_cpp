@@ -10,11 +10,17 @@
 namespace water_model {
 
     #if defined(TIP3P) && defined(TIP3PFP)
-    #error "Define only one water model: TIP3P or TIP3PFP"
+    #error "Define only one water model: TIP3P or TIP3PFP or TIP4P"
+    #endif
+    #if defined(TIP3P) && defined(TIP4P)
+    #error "Define only one water model: TIP3P or TIP3PFP or TIP4P"
+    #endif
+    #if defined(TIP3PFP) && defined(TIP4P)
+    #error "Define only one water model: TIP3P or TIP3PFP or TIP4P"
     #endif
 
-    #if !defined(TIP3P) && !defined(TIP3PFP)
-    #error "No water model selected. Compile with -DTIP3P or -DTIP3PFP"
+    #if !defined(TIP3P) && !defined(TIP3PFP) && !defined(TIP4P)
+    #error "No water model selected. Compile with -DTIP3P or -DTIP3PFP or -DTIP4P"
     #endif
 
     #if defined(TIP3P)
@@ -27,6 +33,13 @@ namespace water_model {
     static constexpr float Q_H      =  0.4242f;
     static constexpr float EPS_O    =  0.15586604f;
     static constexpr float RMINH_O  =  1.7835723f;
+    #elif defined(TIP4P)
+    static constexpr float Q_O      =  0.f;
+    static constexpr float Q_H      =  0.520f;
+    static constexpr float Q_M      =  -2.0f * Q_H;
+    static constexpr float EPS_O    =  0.1550f;
+    static constexpr float RMINH_O  =  1.7698915f;
+    static constexpr float dOM      =  0.15f;
     #endif
 
     // Helpers (optional but nice)
@@ -52,6 +65,10 @@ namespace water_model {
         w[OX]=0.000f; w[OY]=0.000f; w[OZ]=-0.018f; w[ORES]=(float)resnum;
         w[H1X]=0.000f; w[H1Y]=0.761f; w[H1Z]=0.595f; w[H1RES]=(float)resnum;
         w[H2X]=0.000f; w[H2Y]=-0.761f; w[H2Z]=0.594f; w[H2RES]=(float)resnum;
+    #elif defined(TIP4P)
+        w[OX]=0.000f; w[OY]=-0.06556f; w[OZ]=-0.018f; w[ORES]=(float)resnum;
+        w[H1X]=0.75695f; w[H1Y]=0.52032f; w[H1Z]=0.000f; w[H1RES]=(float)resnum;
+        w[H2X]=-0.75695f; w[H2Y]=0.52032f; w[H2Z]=0.000f; w[H2RES]=(float)resnum;
     #endif
     }
 }

@@ -12,7 +12,7 @@
         "CMAKE_C_COMPILER": "/usr/bin/gcc-12",
         "CMAKE_CXX_COMPILER": "/usr/bin/g++-12",
         "CUDAToolkit_ROOT": "/usr/lib/nvidia-cuda-toolkit",
-        "WATER_MODEL": "TIP3P"
+        "WATER_MODEL": "TIP4P"
       }
     }
   ]

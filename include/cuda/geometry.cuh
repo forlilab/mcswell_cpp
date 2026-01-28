@@ -49,3 +49,27 @@ float3u rodrigues_rotate_point(const float3u& p, const float3u& k_unit, float an
     const float3u vrot = add(add(term1, term2), term3);
     return add(pivot, vrot);
 }
+
+// Computes M-site position for TIP4P water model. 
+// dOM is the distance from oxygen to M-site along the HOH bisector 
+__host__ __device__ __forceinline__ 
+float3u tip4p_m_site(const float ox, const float oy, const float oz, 
+    const float h1_x, const float h1_y, const float h1_z,
+    const float h2_x, const float h2_y, const float h2_z,
+    float dOM) {
+    // Unit vectors from oxygen to hydrogens
+    float3u o = make_float3u(ox, oy, oz);
+    float3u h1 = make_float3u(h1_x, h1_y, h1_z);
+    float3u h2 = make_float3u(h2_x, h2_y, h2_z);
+
+    float3u u1 = normalize(sub(h1, o));
+    float3u u2 = normalize(sub(h2, o));
+
+    // Bisector direction (points toward the hydrogens)
+    float3u b = add(u1, u2);
+    float3u bhat = normalize(b);
+
+    // M-site is displaced from O along the bisector direction
+    return add(o, mul(bhat, dOM));
+
+}

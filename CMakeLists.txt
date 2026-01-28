@@ -36,15 +36,17 @@ if (NOT MSVC)
 endif()
 
 # --- Water model selection ---
-set(WATER_MODEL "TIP3P" CACHE STRING "Water model: TIP3P or TIP3PFP")
+set(WATER_MODEL "TIP3P" CACHE STRING "Water model: TIP3P, TIP3PFP or TIP4P")
 set_property(CACHE WATER_MODEL PROPERTY STRINGS TIP3P TIP3PFP)
 
 if(WATER_MODEL STREQUAL "TIP3P")
   target_compile_definitions(_mcswell_cpp PRIVATE TIP3P)
 elseif(WATER_MODEL STREQUAL "TIP3PFP")
   target_compile_definitions(_mcswell_cpp PRIVATE TIP3PFP)
+elseif(WATER_MODEL STREQUAL "TIP4P")
+  target_compile_definitions(_mcswell_cpp PRIVATE TIP4P)
 else()
-  message(FATAL_ERROR "Invalid WATER_MODEL='${WATER_MODEL}'. Use TIP3P or TIP3PFP.")
+  message(FATAL_ERROR "Invalid WATER_MODEL='${WATER_MODEL}'. Use TIP3P, TIP3PFP or TIP4P.")
 endif()
 
 install(TARGETS _mcswell_cpp
