@@ -102,7 +102,10 @@ std::vector<float> run_mcswell_gpu_titration(
     // -------------------------
     // Debug prints (optional)
     // -------------------------
-    std::cout << "[run_mcswell_gpu_titration_dummy]\n"
+    
+
+    std::cout << "[run_mcswell_gpu_titration]\n"
+              << "  Water model: " << WATER_MODEL_NAME << "\n"
               << "  receptor_atoms: " << n_receptor_atoms << "\n"
               << "  n_points: " << n_points << "\n"
               << "  spacing: " << spacing << "\n"
