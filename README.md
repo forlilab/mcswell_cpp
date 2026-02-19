@@ -2,11 +2,12 @@
 MCSwell is a new tool to predict hydration sites positions and thermodynamics using Monte Carlo (MC) sampling. MCSwell is part of the Waterkit suite.
 
 # Installation
-Create a new conda environment:
+Create a new conda (or mamba/micromamba) environment:
 
 ```console
 foo@bar:~$ conda create -n mcswell && conda activate mcswell
 (mcswell) foo@bar:~$ conda install scikit-learn pandas scipy numpy matplotlib openmm openmmforcefields openff-toolkit pdbfixer parmed mdanalysis griddataformats mdtraj espaloma
+(mcswell) foo@bar:~$ pip install scikit-build-core pybind11
 ```
 
 # Compilation
