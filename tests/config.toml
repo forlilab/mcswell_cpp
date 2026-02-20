@@ -1,10 +1,10 @@
 title = "TOML configuraiton file for MCSwell"
 
 [io]
-save_path="/data/phd/mcswell_cpp/tests"
+save_path="example"
 
 [receptor]
-path=["/data/phd/mcswell_cpp/tests/5pti.cif"]
+path=["example/5pti.cif"]
 
 # This part is commented out as the test does not have a ligand
 # [ligand]
