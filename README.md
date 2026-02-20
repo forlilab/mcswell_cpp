@@ -20,7 +20,7 @@ To compile the C++ application with default settings (TIP3P ff):
 To change the water model used:
  modify the field "WATER MODEL" in CMakePresets.json
 
-As of now only TIP3P and TIP3FB water models are available.
+As of now only TIP3P, TIP3FB and TIP4P water models are available.
 
 # Config file
 You can find an example of the configuration file in tests (config.toml)
@@ -127,7 +127,7 @@ Omit this section for receptor-only hydration.
 
 
 
-# Exection
+# Execution
 To run MCSwell:
 
 ```console
