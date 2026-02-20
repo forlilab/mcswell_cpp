@@ -133,3 +133,9 @@ To run MCSwell:
 ```console
 (mcswell) foo@bar:~$ python /path_to_mcswell_cpp/python/run_mcswell.py <path_to_the_config_file>
 ```
+
+You can run the example provided in the `example` folder:
+
+```console
+(mcswell) foo@bar:~$ python python/run_mcswell.py example/config.toml
+```
