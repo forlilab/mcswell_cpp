@@ -55,7 +55,7 @@ To compile the C++ application with default settings (TIP3P ff):
 
 ```console
 (mcswell) foo@bar:~$ cd /path/to/mcswell_cpp
-(mcswell) foo@bar/mcswell_cpp:~$ pip install -e . -v --config-settings=cmake.args="--preset default"
+(mcswell) foo@bar/mcswell_cpp:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults"
 ```
 
 To change the water model used:
