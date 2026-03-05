@@ -2,17 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import os, re, sys, csv, glob, random
-from dataclasses import dataclass
-from collections import defaultdict
 
 import tomli
 import numpy as np
-from scipy.cluster import hierarchy
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter, maximum_filter
 import matplotlib.pyplot as plt
-import MDAnalysis as mda
-import hdbscan
 from utils import *
 
 

@@ -51,6 +51,22 @@ foo@bar:~$ conda create -n mcswell python=3.11 -y && conda activate mcswell
 (mcswell) foo@bar:~$ pip install scikit-build-core pybind11
 ```
 
+4. Remove conda CUDA packages (they conflict with the system CUDA toolkit)
+
+OpenMM pulls in conda CUDA packages (`cuda-nvcc`, etc.) that override the system
+`nvcc` and inject incompatible compiler flags. Remove them so the build uses the
+system CUDA toolkit instead:
+
+```console
+(mcswell) foo@bar:~$ conda remove --force cuda-nvcc cuda-cudart cuda-cudart-dev \
+  cuda-driver-dev cuda-nvrtc cuda-nvrtc-dev cuda-profiler-api 2>/dev/null; true
+(mcswell) foo@bar:~$ unset NVCC_PREPEND_FLAGS CXX CC
+(mcswell) foo@bar:~$ ln -sf /usr/bin/strip "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-strip"
+```
+
+> **Note:** This does not affect OpenMM at runtime — it only uses the CUDA shared
+> libraries already installed system-wide by the GPU driver.
+
 # Compilation
 To compile the C++ application with default settings (TIP3P ff):
 
