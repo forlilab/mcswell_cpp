@@ -1,17 +1,16 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 23, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "cuda-gcc12",
       "displayName": "CUDA (nvcc) + GCC/G++ 12",
       "generator": "Ninja",
       "cacheVariables": {
-        "CMAKE_CUDA_COMPILER": "/usr/bin/nvcc",
-        "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++-12",
-        "CMAKE_C_COMPILER": "/usr/bin/gcc-12",
-        "CMAKE_CXX_COMPILER": "/usr/bin/g++-12",
-        "CUDAToolkit_ROOT": "/usr/lib/nvidia-cuda-toolkit",
         "WATER_MODEL": "TIP3P"
       }
     }

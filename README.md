@@ -1,12 +1,52 @@
 # MCSwell
 MCSwell is a new tool to predict hydration sites positions and thermodynamics using Monte Carlo (MC) sampling. MCSwell is part of the Waterkit suite.
 
+At the moment MCSwell is not supported on Windows.
+
+# Requirements
+- NVIDIA GPU with CUDA Compute Capability >= 3.5
+- CUDA Toolkit >= 11.0 (required for C++17 support)
+- GCC >= 7 (or any C++17-capable compiler)
+- CMake >= 3.18
+- Ninja build system
+- Python >= 3.9
+
 # Installation
-Create a new conda (or mamba/micromamba) environment:
+1. Install system packages
 
 ```console
-foo@bar:~$ conda create -n mcswell && conda activate mcswell
-(mcswell) foo@bar:~$ conda install scikit-learn pandas scipy numpy matplotlib openmm openmmforcefields openff-toolkit pdbfixer parmed mdanalysis griddataformats mdtraj espaloma
+# Update system
+foo@bar:~$ sudo apt update && sudo apt upgrade -y
+```
+
+```console
+# Install GCC, CMake, Ninja
+foo@bar:~$ sudo apt install -y gcc g++ cmake ninja-build
+```
+
+```console
+# Install NVIDIA CUDA Toolkit (>= 11.0)
+foo@bar:~$ sudo apt install -y nvidia-cuda-toolkit
+```
+
+> **Note:** The `nvidia-cuda-toolkit` package version depends on your Ubuntu release.
+> On Ubuntu 20.04+ this provides CUDA 11+. Verify with `nvcc --version` after installation.
+> If your distribution provides an older version, install CUDA from the
+> [NVIDIA CUDA downloads page](https://developer.nvidia.com/cuda-downloads) instead.
+
+2. Install Conda (miniconda)
+```console
+foo@bar:~$ wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+foo@bar:~$ bash Miniconda3-latest-Linux-x86_64.sh
+# restart shell or source ~/.bashrc
+```
+3. Create environment & install Python dependencies
+
+```console
+foo@bar:~$ conda create -n mcswell python=3.11 -y && conda activate mcswell
+(mcswell) foo@bar:~$ conda install -c conda-forge scikit-learn pandas scipy numpy matplotlib \
+  openmm openmmforcefields openff-toolkit pdbfixer parmed \
+  mdanalysis griddataformats mdtraj -y
 (mcswell) foo@bar:~$ pip install scikit-build-core pybind11
 ```
 
@@ -14,7 +54,8 @@ foo@bar:~$ conda create -n mcswell && conda activate mcswell
 To compile the C++ application with default settings (TIP3P ff):
 
 ```console
-(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset cuda-gcc12"
+(mcswell) foo@bar:~$ cd /path/to/mcswell_cpp
+(mcswell) foo@bar/mcswell_cpp:~$ pip install -e . -v --config-settings=cmake.args="--preset default"
 ```
 
 To change the water model used:
