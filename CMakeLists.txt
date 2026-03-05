@@ -4,6 +4,12 @@ project(mcswell_cpp LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Build SASS for common GPU architectures + PTX for forward compatibility.
+# Override at configure time with -DCMAKE_CUDA_ARCHITECTURES="80;90" etc.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80;86;89;90")
+endif()
+
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
