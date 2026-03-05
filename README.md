@@ -5,7 +5,7 @@ At the moment MCSwell is not supported on Windows.
 
 # Requirements
 - NVIDIA GPU with CUDA Compute Capability >= 3.5
-- CUDA Toolkit >= 11.0 (required for C++17 support)
+- CUDA Toolkit >= 12.0
 - GCC >= 7 (or any C++17-capable compiler)
 - CMake >= 3.18
 - Ninja build system
@@ -25,12 +25,13 @@ foo@bar:~$ sudo apt install -y gcc g++ cmake ninja-build
 ```
 
 ```console
-# Install NVIDIA CUDA Toolkit (>= 11.0)
+# Install NVIDIA CUDA Toolkit (>= 12.0)
 foo@bar:~$ sudo apt install -y nvidia-cuda-toolkit
 ```
 
 > **Note:** The `nvidia-cuda-toolkit` package version depends on your Ubuntu release.
-> On Ubuntu 20.04+ this provides CUDA 11+. Verify with `nvcc --version` after installation.
+> CUDA 12.0+ is required due to glibc compatibility with the `_FloatN` types used in
+> newer system headers. Verify with `nvcc --version` after installation.
 > If your distribution provides an older version, install CUDA from the
 > [NVIDIA CUDA downloads page](https://developer.nvidia.com/cuda-downloads) instead.
 
