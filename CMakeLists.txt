@@ -1,4 +1,14 @@
 cmake_minimum_required(VERSION 3.18)
+
+# Workaround: CUDA 11.x + glibc ≥ 2.38 — nvcc's frontend (cudafe++) does not
+# understand _Float32/_Float64x/_Float128 types declared in <math.h>.
+# Force-include a header that suppresses those declarations.
+# Must be set BEFORE project() so it applies during compiler detection.
+set(_GLIBC_COMPAT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuda_glibc_compat.h")
+if(EXISTS "${_GLIBC_COMPAT}")
+  set(ENV{CUDAFLAGS} "$ENV{CUDAFLAGS} --pre-include ${_GLIBC_COMPAT}")
+endif()
+
 project(mcswell_cpp LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
