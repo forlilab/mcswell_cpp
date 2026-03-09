@@ -76,7 +76,7 @@ def fix_pdb(pdbfile: str, pdbxfile: str, keep_heterogens: bool=False):
     return fixer.topology, fixer.positions
 
 def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml", 
-        "amber14/tip3p.xml"]):
+        "amber14/tip3p.xml", "implicit/gbn2.xml"]):
     waters_residue_names = ["HOH", "WAT"]
     mcswell_atoms = list()
 
@@ -109,12 +109,26 @@ def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml"
         protein_atoms = [atom for atom in protein_topology.atoms() if atom.residue.name not in ["NA", "CL", "K"]]
         forcefield = ForceField(*protein_ff)
         system = forcefield.createSystem(protein_modeller.topology,
-                                        nonbondedMethod=PME,
-                                        nonbondedCutoff=10*openmmunit.angstrom,
+                                        # nonbondedMethod=PME,
+                                        # nonbondedCutoff=10*openmmunit.angstrom,
                                         switchDistance=9*openmmunit.angstrom,
                                         removeCMMotion=True,
-                                        constraints=HBonds,
-                                        hydrogenMass=1.0*openmmunit.amu)
+                                        # constraints=HBonds,
+                                        hydrogenMass=1.0*openmmunit.amu,
+                                        soluteDielectric=1.0,
+                                        solventDielectric=78.5)
+        
+        print("Minimizing hydrogen geometry...")
+        _integrator = openmm.LangevinMiddleIntegrator(
+            300 * unit.kelvin, 1 / unit.picosecond, 0.004 * unit.picoseconds
+        )
+        _simulation = Simulation(protein_modeller.topology, system, _integrator)
+        _simulation.context.setPositions(protein_modeller.positions)
+        _simulation.minimizeEnergy(maxIterations=500)
+        positions = _simulation.context.getState(getPositions=True).getPositions()
+        protein_modeller.positions = positions
+        print("[Minimization done")
+
         # Save the cleaned receptor
         rec_name = pdb_file.split("/")[-1].split(".")[0]
         PDBFile.writeFile(protein_modeller.topology, protein_modeller.positions, open(f'{project_path}/system_cleaned.pdb', 'w'))
