@@ -67,6 +67,26 @@ system CUDA toolkit instead:
 > **Note:** This does not affect OpenMM at runtime — it only uses the CUDA shared
 > libraries already installed system-wide by the GPU driver.
 
+5. Verify the correct CUDA toolkit is active
+
+After removing the conda CUDA packages, confirm that `nvcc` points to the **system**
+installation and not to the conda environment:
+
+```console
+(mcswell) foo@bar:~$ which nvcc
+/usr/local/cuda/bin/nvcc
+(mcswell) foo@bar:~$ nvcc --version
+```
+
+If `which nvcc` still points to `$CONDA_PREFIX/bin/nvcc`, explicitly set the system
+CUDA toolkit before compiling:
+
+```console
+(mcswell) foo@bar:~$ export CUDA_HOME=/usr/local/cuda
+(mcswell) foo@bar:~$ export CUDACXX=/usr/local/cuda/bin/nvcc
+(mcswell) foo@bar:~$ export PATH=/usr/local/cuda/bin:$PATH
+```
+
 # Compilation
 To compile the C++ application with default settings (TIP3P ff):
 
