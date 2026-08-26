@@ -209,11 +209,23 @@ Omit this section for receptor-only hydration.
 To run MCSwell:
 
 ```console
-(mcswell) foo@bar:~$ python /path_to_mcswell_cpp/python/run_mcswell.py <path_to_the_config_file>
+(mcswell) foo@bar:~$ python /path_to_mcswell_cpp/python/run_mcswell.py --config <path_to_the_config_file>
 ```
+
+By default this runs the GCMC titration and both free-energy post-processing
+methods (ProtoMS-style GCI and the independent-site binomial fit). Restrict
+to a single method with `--energy-estimation-method`:
+
+```console
+(mcswell) foo@bar:~$ python /path_to_mcswell_cpp/python/run_mcswell.py \
+    --config <path_to_the_config_file> \
+    --energy-estimation-method gci
+```
+
+Accepted values are `gci`, `binomial`, or `both` (default).
 
 You can run the example provided in the `example` folder:
 
 ```console
-(mcswell) foo@bar:~$ python python/run_mcswell.py example/config.toml
+(mcswell) foo@bar:~$ python python/run_mcswell.py --config example/config.toml
 ```
