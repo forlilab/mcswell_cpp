@@ -1,3 +1,22 @@
+#   Copyright (c) 2026 Scripps Research, Forli Lab.
+#   All rights reserved.
+#
+#   Author: Niccolo Bruciaferri
+#
+#   This library is free software; you can redistribute it and/or
+#   modify it under the terms of the GNU Lesser General Public
+#   License as published by the Free Software Foundation; either
+#   version 2.1 of the License, or (at your option) any later version.
+#
+#   This library is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#   Lesser General Public License for more details.
+#
+#   You should have received a copy of the GNU Lesser General Public
+#   License along with this library; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
 cmake_minimum_required(VERSION 3.18)
 
 # Must be set BEFORE project() so CMake uses it during CUDA compiler detection.
@@ -43,20 +62,17 @@ if (NOT MSVC)
 endif()
 
 # --- Water model selection ---
-set(WATER_MODEL "TIP3P" CACHE STRING "Water model: TIP3P, TIP3PFP or TIP4P")
-set_property(CACHE WATER_MODEL PROPERTY STRINGS TIP3P TIP3PFP)
+set(WATER_MODEL "TIP4P" CACHE STRING "Water model: TIP3P or TIP4P")
+set_property(CACHE WATER_MODEL PROPERTY STRINGS TIP3P TIP4P)
 
 if(WATER_MODEL STREQUAL "TIP3P")
   target_compile_definitions(_mcswell_cpp PRIVATE TIP3P)
-  target_compile_definitions(_mcswell_cpp PRIVATE WATER_MODEL_NAME="${WATER_MODEL}")
-elseif(WATER_MODEL STREQUAL "TIP3PFP")
-  target_compile_definitions(_mcswell_cpp PRIVATE TIP3PFP)
   target_compile_definitions(_mcswell_cpp PRIVATE WATER_MODEL_NAME="${WATER_MODEL}")
 elseif(WATER_MODEL STREQUAL "TIP4P")
   target_compile_definitions(_mcswell_cpp PRIVATE TIP4P)
   target_compile_definitions(_mcswell_cpp PRIVATE WATER_MODEL_NAME="${WATER_MODEL}")
 else()
-  message(FATAL_ERROR "Invalid WATER_MODEL='${WATER_MODEL}'. Use TIP3P, TIP3PFP or TIP4P.")
+  message(FATAL_ERROR "Invalid WATER_MODEL='${WATER_MODEL}'. Use TIP3P or TIP4P.")
 endif()
 
 install(TARGETS _mcswell_cpp
