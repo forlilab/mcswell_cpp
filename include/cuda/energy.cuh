@@ -395,7 +395,7 @@ float eval_energy_with_receptor(
             }
         }
 #else
-        // TIP3P / TIP3PFP charges are on O/H/H
+        // TIP3P charges are on O/H/H
         {
             // O
             {

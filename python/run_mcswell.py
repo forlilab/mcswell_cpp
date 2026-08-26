@@ -18,15 +18,16 @@
 #   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 import mcswell_cpp as mc
+import argparse
 import io
 import numpy as np
 import itertools
 import time
-import sys
 import os
 from utils import *
 import tomllib
 import estimate_free_energies as fe
+import estimate_free_energies_GCI as fe_gci
 from rdkit import Chem 
 from rdkit.Chem import SDMolSupplier
 from openmm.app import *
@@ -331,13 +332,19 @@ def run_mcswell(config, project_path, n_gcmc_steps=None):
     print("Starting MCSwell!")
     center = [center_x, center_y, center_z]
     pts = mc.make_insertion_points(
-        parametrized_atoms,
-        size=(x_size, y_size, z_size),
-        spacing=spacing,
-        center=center,
-        max_distance=distance_cutoff,
-        min_distance=1.5,
-    )
+         parametrized_atoms,
+         size=(x_size, y_size, z_size),
+         spacing=spacing,
+         center=center,
+         max_distance=distance_cutoff,
+         min_distance=1.5,
+     )
+
+    # make_insertion_points returns a flat xyz array/list, so the number of
+    # insertion points is total scalar count / 3.  The C++ sampler uses
+    # V_sampler = n_points * spacing^3 for the Adams parameter.
+    n_insertion_points = int(np.asarray(pts).size // 3)
+    sampler_volume = float(n_insertion_points * spacing**3)
     start = time.time()
     save_path = f"{project_path}/frames/"
     os.makedirs(save_path, exist_ok=True)
@@ -355,15 +362,50 @@ def run_mcswell(config, project_path, n_gcmc_steps=None):
 
     exec_time = time.time() - start
     print(f"Time necessary for the C++ part: {exec_time/60} minutes - {exec_time} seconds")
-    return
+    return {
+        "n_insertion_points": n_insertion_points,
+        "sampler_volume": sampler_volume,
+    }
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Run an MCSwell GCMC titration and its free-energy post-processing."
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to the MCSwell TOML configuration file.",
+    )
+    parser.add_argument(
+        "--energy-estimation-method",
+        dest="energy_estimation_method",
+        choices=("gci", "binomial", "both"),
+        default="both",
+        help=(
+            "Free-energy post-processing method to run: 'gci' (ProtoMS-style "
+            "Grand Canonical Integration), 'binomial' (independent-site "
+            "binomial MLE occupancy fit), or 'both' (default: runs both)."
+        ),
+    )
+    return parser
 
 
 if __name__ == "__main__":
-    config_path = sys.argv[1]
-    print(config_path)
-    with open(config_path, "rb") as fi:
+    args = build_parser().parse_args()
+    print(args.config)
+    with open(args.config, "rb") as fi:
         config = tomllib.load(fi)
     project_path_base = config["io"]["save_path"]
     print("Starting")
-    run_mcswell(config, project_path_base)
-    fe.main(config)
+    run_info = run_mcswell(config, project_path_base)
+
+    if args.energy_estimation_method in ("binomial", "both"):
+        fe.main(
+            config,
+            sampler_volume=run_info["sampler_volume"])
+    if args.energy_estimation_method in ("gci", "both"):
+        fe_gci.main(
+            config,
+            sampler_volume=run_info["sampler_volume"]
+        )
