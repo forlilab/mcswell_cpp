@@ -104,6 +104,11 @@ static void print_atoms(const std::vector<Atom>& atoms, std::size_t max_print = 
 PYBIND11_MODULE(_mcswell_cpp, m) {
     m.doc() = "Minimal C++ bindings scaffold for MCSwell porting (CPU-only stub).";
 
+    // Water model compiled into this extension (see CMakeLists.txt WATER_MODEL
+    // and include/cuda/water_model.cuh). Lets Python post-processing pick a
+    // matching bulk chemical potential instead of assuming TIP3P.
+    m.attr("WATER_MODEL_NAME") = WATER_MODEL_NAME;
+
     py::class_<Atom>(m, "Atom")
         .def(py::init<std::string,
                       std::string,
