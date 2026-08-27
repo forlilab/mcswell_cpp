@@ -4,8 +4,11 @@ MCSwell is a new tool to predict hydration sites positions and thermodynamics us
 At the moment MCSwell is not supported on Windows.
 
 # Requirements
-- NVIDIA GPU with CUDA Compute Capability >= 3.5
-- CUDA Toolkit >= 12.0
+- NVIDIA GPU with CUDA Compute Capability >= 5.0 (Maxwell or newer; CUDA 12.x
+  no longer supports Kepler). GPUs newer than Hopper (compute capability 9.0),
+  including Blackwell, are supported via forward-compatible PTX and do not
+  need to be explicitly listed — see the CMake note below.
+- CUDA Toolkit >= 12.0 (enforced at configure time)
 - GCC >= 7 (or any C++17-capable compiler)
 - CMake >= 3.18
 - Ninja build system
@@ -99,6 +102,42 @@ To change the water model used:
  modify the field "WATER MODEL" in CMakePresets.json
 
 As of now only TIP3P and TIP4P water models are available.
+
+## GPU architecture / CUDA compatibility
+
+By default, MCSwell builds native (SASS) GPU code for every desktop/datacenter
+architecture from Maxwell through Hopper, plus a PTX fallback for Hopper.
+Thanks to PTX's forward compatibility, this means the resulting build also
+runs on any GPU newer than Hopper (e.g. Blackwell), even though no explicit
+code is generated for it — the driver JIT-compiles the fallback PTX the first
+time a kernel is launched (a one-time delay on first run, no rebuild needed).
+
+If you have a newer GPU and a CUDA Toolkit that supports it natively (e.g.
+CUDA >= 12.8 for Blackwell), you can get faster startup by adding native code
+for your architecture explicitly:
+
+```console
+(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults -DCMAKE_CUDA_ARCHITECTURES=90;100;120"
+```
+
+Or build only for the GPU(s) actually present on the machine:
+
+```console
+(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults -DCMAKE_CUDA_ARCHITECTURES=native"
+```
+
+The build fails fast with a clear error if your CUDA Toolkit is below the
+required 12.0 floor, instead of failing later with a confusing compiler error.
+
+> **Known issue:** some CUDA >= 12.0 installations (reported with CUDA 12.6
+> on Ubuntu 24.04/GCC 13) fail during CMake's own compiler-detection step with
+> `_Float64`/`_Float128`/`issignaling` errors from glibc headers. This has
+> been verified to **not** reproduce with CUDA 12.0 on the same Ubuntu
+> 24.04/glibc 2.39/GCC 13.3 combination, so it looks specific to certain CUDA
+> point releases (or to a conda/pip-provided `nvcc` shadowing the system one —
+> see the note above about removing conda CUDA packages). If you hit this,
+> please open an issue with `which nvcc`, `nvcc --version`, and your full
+> error log.
 
 # Config file
 You can find an example of the configuration file in tests (config.toml)
