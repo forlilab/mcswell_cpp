@@ -20,12 +20,49 @@
 cmake_minimum_required(VERSION 3.18)
 
 # Must be set BEFORE project() so CMake uses it during CUDA compiler detection.
-# Override at configure time with -DCMAKE_CUDA_ARCHITECTURES="80;90" etc.
+# Native (SASS) code for every desktop/datacenter architecture from Maxwell
+# through Hopper, which every CUDA >= 12.0 toolkit can target, plus a
+# PTX-only ("virtual") fallback for the newest of them (Hopper). PTX is
+# forward-compatible: a GPU newer than anything listed here (e.g. Blackwell,
+# or an architecture that doesn't exist yet) will JIT-compile that PTX at
+# first kernel launch instead of failing with "no kernel image is available
+# for this device."
+#
+# Override at configure time for a specific build, e.g.:
+#   -DCMAKE_CUDA_ARCHITECTURES=native        (only the GPU(s) present locally)
+#   -DCMAKE_CUDA_ARCHITECTURES="90;100;120"  (add native Blackwell codegen,
+#                                              requires CUDA >= 12.8)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80;86;89;90")
+  set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80;86;89;90;90-virtual")
 endif()
 
 project(mcswell_cpp LANGUAGES CXX CUDA)
+
+# Enforce the CUDA Toolkit floor documented in README.md instead of letting
+# an older toolkit fail later with a confusing, unrelated error.
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS "12.0")
+  message(FATAL_ERROR
+    "MCSwell requires CUDA Toolkit >= 12.0 (found ${CMAKE_CUDA_COMPILER_VERSION} "
+    "at ${CMAKE_CUDA_COMPILER}). See README.md for installation instructions.")
+endif()
+
+# A conda/mamba-provided nvcc (commonly pulled in transitively by OpenMM)
+# resolved via PATH instead of the system CUDA Toolkit is a known source of
+# glibc/nvcc header conflicts (_Float64/_Float128/issignaling errors from
+# <bits/mathcalls-narrow.h>, <bits/iscanonical.h>, <math.h>) on newer distros
+# such as Ubuntu 24.04 -- reproduced and confirmed against this project's own
+# CMakeLists.txt (see issue #4). Warn early instead of letting users hit a
+# cryptic compiler-detection failure.
+if(CMAKE_CUDA_COMPILER MATCHES "(conda|mamba)[a-zA-Z0-9_]*[/\\]envs[/\\]|[/\\](miniconda3|anaconda3|miniforge3|mambaforge)[/\\]")
+  message(WARNING
+    "CMAKE_CUDA_COMPILER (${CMAKE_CUDA_COMPILER}) appears to come from a "
+    "conda/mamba environment rather than the system CUDA Toolkit. This is a "
+    "known source of glibc/nvcc header conflicts on newer distros (see "
+    "README.md, 'Remove conda CUDA packages'). If configuration fails with "
+    "_Float64/_Float128/issignaling errors, remove the conda-provided "
+    "cuda-nvcc package or set -DCMAKE_CUDA_COMPILER=/path/to/system/nvcc "
+    "explicitly (e.g. /usr/bin/nvcc or /usr/local/cuda/bin/nvcc).")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
