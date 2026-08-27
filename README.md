@@ -4,8 +4,11 @@ MCSwell is a new tool to predict hydration sites positions and thermodynamics us
 At the moment MCSwell is not supported on Windows.
 
 # Requirements
-- NVIDIA GPU with CUDA Compute Capability >= 3.5
-- CUDA Toolkit >= 12.0
+- NVIDIA GPU with CUDA Compute Capability >= 5.0 (Maxwell or newer; CUDA 12.x
+  no longer supports Kepler). GPUs newer than Hopper (compute capability 9.0),
+  including Blackwell, are supported via forward-compatible PTX and do not
+  need to be explicitly listed — see the CMake note below.
+- CUDA Toolkit >= 12.0 (enforced at configure time)
 - GCC >= 7 (or any C++17-capable compiler)
 - CMake >= 3.18
 - Ninja build system
@@ -51,11 +54,19 @@ foo@bar:~$ conda create -n mcswell python=3.11 -y && conda activate mcswell
 (mcswell) foo@bar:~$ pip install scikit-build-core pybind11
 ```
 
-4. Remove conda CUDA packages (they conflict with the system CUDA toolkit)
+4. Resolve the conda/system CUDA conflict
 
-OpenMM pulls in conda CUDA packages (`cuda-nvcc`, etc.) that override the system
-`nvcc` and inject incompatible compiler flags. Remove them so the build uses the
-system CUDA toolkit instead:
+OpenMM pulls in conda CUDA packages (`cuda-nvcc`, etc.) that, if left as-is,
+override the system `nvcc` and can cause the CUDA build to fail with obscure
+glibc header errors (`_Float64`/`_Float128`/`issignaling`, seen on e.g. Ubuntu
+24.04) — this was tracked down in
+[issue #4](https://github.com/forlilab/mcswell_cpp/issues/4). Pick **one** of
+the two options below.
+
+### Option A: remove the conda CUDA packages, build against the system toolkit
+
+Simplest if you already have a working system-wide CUDA Toolkit (Requirements,
+above).
 
 ```console
 (mcswell) foo@bar:~$ conda remove --force cuda-nvcc cuda-cudart cuda-cudart-dev \
@@ -67,10 +78,8 @@ system CUDA toolkit instead:
 > **Note:** This does not affect OpenMM at runtime — it only uses the CUDA shared
 > libraries already installed system-wide by the GPU driver.
 
-5. Verify the correct CUDA toolkit is active
-
-After removing the conda CUDA packages, confirm that `nvcc` points to the **system**
-installation and not to the conda environment:
+Then confirm that `nvcc` now resolves to the **system** installation, not the
+conda environment:
 
 ```console
 (mcswell) foo@bar:~$ which nvcc
@@ -78,14 +87,51 @@ installation and not to the conda environment:
 (mcswell) foo@bar:~$ nvcc --version
 ```
 
-If `which nvcc` still points to `$CONDA_PREFIX/bin/nvcc`, explicitly set the system
-CUDA toolkit before compiling:
+If `which nvcc` still points to `$CONDA_PREFIX/bin/nvcc`, explicitly set the
+system CUDA toolkit before compiling:
 
 ```console
 (mcswell) foo@bar:~$ export CUDA_HOME=/usr/local/cuda
 (mcswell) foo@bar:~$ export CUDACXX=/usr/local/cuda/bin/nvcc
 (mcswell) foo@bar:~$ export PATH=/usr/local/cuda/bin:$PATH
 ```
+
+### Option B: build entirely inside the conda/micromamba environment (no sudo, no system CUDA needed)
+
+Instead of removing conda's CUDA packages, install a *complete, matched* CUDA
+toolchain directly into the same environment, so `nvcc` and its headers stay
+fully self-contained and never touch (or conflict with) the system's glibc.
+This never requires root and works even on machines with no system-wide CUDA
+Toolkit at all.
+
+**This only works if you get one thing right: `cuda-version` must not exceed
+what your GPU driver actually supports**, or the build will succeed but
+OpenMM will fail at runtime with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`. Check
+the ceiling first:
+
+```console
+(mcswell) foo@bar:~$ nvidia-smi | head -3
+# ... | Driver Version: 570.211.01   CUDA Version: 12.8 |
+```
+
+Use that reported version (`12.8` in this example, not higher) for
+`cuda-version` below:
+
+```console
+(mcswell) foo@bar:~$ conda install -c conda-forge "cuda-version=12.8" \
+  gcc_linux-64 gxx_linux-64 cuda-nvcc cuda-crt cuda-cudart-dev libcurand-dev -y
+```
+
+`gcc_linux-64`/`gxx_linux-64` matter here: they bring conda's own bundled,
+version-matched sysroot, so `nvcc` compiles against *that* instead of falling
+through to the system's (possibly newer, incompatible) glibc headers — that
+fallback is exactly what causes the errors from issue #4. `cuda-crt` and
+`cuda-cudart-dev`/`libcurand-dev` provide the headers the plain `cuda-nvcc`
+metapackage doesn't include on its own.
+
+The `mcswell_cpp` build will print a CMake warning that `nvcc` resolves into a
+conda/mamba environment — that warning exists to flag the issue-#4 failure
+mode; with this exact package set it's a known, harmless false positive.
 
 # Compilation
 To compile the C++ application with default settings (TIP3P ff):
@@ -99,6 +145,42 @@ To change the water model used:
  modify the field "WATER MODEL" in CMakePresets.json
 
 As of now only TIP3P and TIP4P water models are available.
+
+## GPU architecture / CUDA compatibility
+
+By default, MCSwell builds native (SASS) GPU code for every desktop/datacenter
+architecture from Maxwell through Hopper, plus a PTX fallback for Hopper.
+Thanks to PTX's forward compatibility, this means the resulting build also
+runs on any GPU newer than Hopper (e.g. Blackwell), even though no explicit
+code is generated for it — the driver JIT-compiles the fallback PTX the first
+time a kernel is launched (a one-time delay on first run, no rebuild needed).
+
+If you have a newer GPU and a CUDA Toolkit that supports it natively (e.g.
+CUDA >= 12.8 for Blackwell), you can get faster startup by adding native code
+for your architecture explicitly:
+
+```console
+(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults -DCMAKE_CUDA_ARCHITECTURES=90;100;120"
+```
+
+Or build only for the GPU(s) actually present on the machine:
+
+```console
+(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults -DCMAKE_CUDA_ARCHITECTURES=native"
+```
+
+The build fails fast with a clear error if your CUDA Toolkit is below the
+required 12.0 floor, instead of failing later with a confusing compiler error.
+
+> **Known issue:** some CUDA >= 12.0 installations (reported with CUDA 12.6
+> on Ubuntu 24.04/GCC 13) fail during CMake's own compiler-detection step with
+> `_Float64`/`_Float128`/`issignaling` errors from glibc headers. This has
+> been verified to **not** reproduce with CUDA 12.0 on the same Ubuntu
+> 24.04/glibc 2.39/GCC 13.3 combination, so it looks specific to certain CUDA
+> point releases (or to a conda/pip-provided `nvcc` shadowing the system one —
+> see the note above about removing conda CUDA packages). If you hit this,
+> please open an issue with `which nvcc`, `nvcc --version`, and your full
+> error log.
 
 # Config file
 You can find an example of the configuration file in tests (config.toml)
