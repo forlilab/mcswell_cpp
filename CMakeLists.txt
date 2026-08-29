@@ -102,6 +102,7 @@ add_library(mcswell_analysis STATIC
     src/analysis/frame_extraction.cpp
     src/analysis/density_grid.cpp
     src/analysis/binomial_fit.cpp
+    src/analysis/gci_fit.cpp
 )
 
 target_include_directories(mcswell_analysis PUBLIC
