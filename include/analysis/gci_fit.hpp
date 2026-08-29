@@ -59,7 +59,22 @@ struct LogisticSumModel {
 struct LogisticSumFitOptions {
     int n_steps = -1; // < 1 means "unset": auto = max(1, round(n_max - n_min))
     int max_terms = 12;
-    int random_starts = 8;
+    // The original scipy-based implementation used 8 (its
+    // trust-region-reflective solver, verified separately against a
+    // synthetic multi-step titration, reliably finds the global optimum
+    // from as few as 2 restarts). This port's hand-rolled Levenberg-
+    // Marquardt (see levenberg_marquardt.hpp) is a weaker local optimizer
+    // for this near-degenerate sum-of-sigmoids problem: measured on the
+    // same synthetic case, 8 restarts found the correct fit only ~33% of
+    // the time (bad fits look like one term collapsing to a tiny
+    // amplitude at a nonsensical center, RMSE two to three orders of
+    // magnitude worse). 64 restarts recovered ~97% on that same
+    // deliberately adversarial (noiseless, single-B-unit-resolution) case;
+    // real GCMC-sampled titrations have thermal noise smoothing this
+    // landscape and should be easier. Kept as a tunable rather than fixed,
+    // since it trades CPU time (a full fit_logistic_sum call, not the GPU
+    // simulation) for reliability.
+    int random_starts = 64;
     std::uint64_t seed = 20260812ULL;
 };
 

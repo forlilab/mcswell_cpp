@@ -98,11 +98,29 @@ inline bool solve_linear_system(std::vector<std::vector<double>> A, std::vector<
 
 // `residual_fn(params, out_residuals)` fills out_residuals (already sized
 // to n_residuals) given the current parameter vector.
+//
+// `lower`/`upper` (both null, or both sized like `params`) add box
+// constraints via simple projection: every candidate step is clipped into
+// [lower[i], upper[i]] before its residual/cost is evaluated. This is a
+// cruder approximation to a real bounded solver than scipy's
+// trust-region-reflective method (which uses reflected steps near a
+// boundary rather than a hard clip), but simple projection is enough to
+// reproduce the behavior that matters here: letting a parameter settle
+// exactly on an active boundary, which a soft exterior penalty does not
+// reliably do (verified empirically against scipy for the GCI
+// logistic-sum fit -- see gci_fit.cpp).
 template <class ResidualFn>
 LMResult levenberg_marquardt(
     ResidualFn residual_fn, std::vector<double> params, std::size_t n_residuals,
-    int max_iterations = 200, double lambda0 = 1e-3, double xtol = 1e-11, double ftol = 1e-11) {
+    int max_iterations = 200, double lambda0 = 1e-3, double xtol = 1e-11, double ftol = 1e-11,
+    const std::vector<double>* lower = nullptr, const std::vector<double>* upper = nullptr) {
     const std::size_t n = params.size();
+
+    auto clip = [&](std::vector<double>& p) {
+        if (!lower || !upper) return;
+        for (std::size_t i = 0; i < n; ++i) p[i] = std::min(std::max(p[i], (*lower)[i]), (*upper)[i]);
+    };
+    clip(params);
 
     std::vector<double> r(n_residuals);
     residual_fn(params, r);
@@ -157,6 +175,7 @@ LMResult levenberg_marquardt(
 
             std::vector<double> new_params(n);
             for (std::size_t a = 0; a < n; ++a) new_params[a] = params[a] + dx[a];
+            clip(new_params);
 
             std::vector<double> new_r(n_residuals);
             residual_fn(new_params, new_r);
@@ -164,7 +183,9 @@ LMResult levenberg_marquardt(
 
             if (new_cost < cost) {
                 double max_param_change = 0.0;
-                for (double d : dx) max_param_change = std::max(max_param_change, std::fabs(d));
+                for (std::size_t a = 0; a < n; ++a) {
+                    max_param_change = std::max(max_param_change, std::fabs(new_params[a] - params[a]));
+                }
                 const double cost_change = std::fabs(cost - new_cost);
 
                 params = new_params;

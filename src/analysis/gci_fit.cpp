@@ -197,24 +197,6 @@ LogisticSumModel fit_logistic_sum(
         }
     };
 
-    auto residual = [&](const std::vector<double>& theta, std::vector<double>& out) {
-        std::vector<double> amps, slopes, centers;
-        unpack(theta, amps, slopes, centers);
-        out.resize(Bs.size());
-        for (std::size_t i = 0; i < Bs.size(); ++i) {
-            double pred = n_min;
-            for (int j = 0; j < m; ++j) {
-                const double z = slopes[static_cast<std::size_t>(j)] * (Bs[i] - centers[static_cast<std::size_t>(j)]);
-                pred += amps[static_cast<std::size_t>(j)] * (1.0 / (1.0 + std::exp(-z)));
-            }
-            out[i] = pred - Ns[i];
-        }
-    };
-
-    std::vector<double> theta0(param_count, 0.0);
-    for (int j = 0; j < m; ++j) theta0[center_start + static_cast<std::size_t>(j)] = centers0[static_cast<std::size_t>(j)];
-    // slope block left at 0.0 -> exp(0) == 1.0 initial slope.
-
     std::vector<double> lower(param_count), upper(param_count);
     {
         std::size_t pos = 0;
@@ -239,9 +221,42 @@ LogisticSumModel fit_logistic_sum(
         }
     }
 
+    // Box constraints via hard projection in the LM solver itself (see
+    // levenberg_marquardt.hpp), not a soft penalty: verified empirically
+    // against scipy for this exact fit that a soft exterior penalty is not
+    // enough. scipy's trust-region-reflective solver on this problem
+    // reliably drives slopes to sit exactly on the upper bound (a real,
+    // beneficial active constraint here -- at slope ~20 the sigmoid is
+    // already far narrower than the mu/B sampling spacing, so it behaves
+    // like a clean step), and a soft penalty only discourages approaching
+    // that boundary rather than reproducing it, landing in a visibly worse
+    // local minimum.
+    auto residual = [&](const std::vector<double>& theta, std::vector<double>& out) {
+        std::vector<double> amps, slopes, centers;
+        unpack(theta, amps, slopes, centers);
+        out.resize(Bs.size());
+        for (std::size_t i = 0; i < Bs.size(); ++i) {
+            double pred = n_min;
+            for (int j = 0; j < m; ++j) {
+                const double z = slopes[static_cast<std::size_t>(j)] * (Bs[i] - centers[static_cast<std::size_t>(j)]);
+                pred += amps[static_cast<std::size_t>(j)] * (1.0 / (1.0 + std::exp(-z)));
+            }
+            out[i] = pred - Ns[i];
+        }
+    };
+
+    std::vector<double> theta0(param_count, 0.0);
+    for (int j = 0; j < m; ++j) theta0[center_start + static_cast<std::size_t>(j)] = centers0[static_cast<std::size_t>(j)];
+    // slope block left at 0.0 -> exp(0) == 1.0 initial slope.
+
     std::mt19937_64 rng(options.seed);
     std::normal_distribution<double> logit_jitter(0.0, 0.6);
-    std::normal_distribution<double> slope_jitter(0.0, 0.35);
+    // Widened from the original implementation's 0.35 (in log-slope space):
+    // empirically, the narrower jitter under-samples large slopes, so
+    // multi-start rarely discovers that a term settling at the slope upper
+    // bound is often the correct (bounded) optimum for this fit -- see
+    // LogisticSumFitOptions::random_starts for the fuller picture.
+    std::normal_distribution<double> slope_jitter(0.0, 1.5);
     std::normal_distribution<double> center_jitter(0.0, 0.12 * bspan);
 
     double best_sse = std::numeric_limits<double>::infinity();
@@ -262,7 +277,7 @@ LogisticSumModel fit_logistic_sum(
             }
         }
 
-        const auto lm_result = levenberg_marquardt(residual, t0, Bs.size());
+        const auto lm_result = levenberg_marquardt(residual, t0, Bs.size(), 200, 1e-3, 1e-11, 1e-11, &lower, &upper);
         if (lm_result.cost < best_sse) {
             best_sse = lm_result.cost;
             best_theta = lm_result.params;
