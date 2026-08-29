@@ -282,13 +282,11 @@ def get_data_from_openmm(receptors, project_path, small_molecules=None, small_mo
     return mcswell_atoms
 
 
-def run_mcswell(config, project_path, n_gcmc_steps=None):
-    titration = True
+def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_method="both"):
     #io
     # project_path = config["io"]["save_path"]
     os.makedirs(project_path, exist_ok=True)
-    os.makedirs(os.path.join(project_path, "frames"), exist_ok=True)
-    
+
     #receptor
     receptor_path = None
     if "receptor" in config:
@@ -340,32 +338,60 @@ def run_mcswell(config, project_path, n_gcmc_steps=None):
          min_distance=1.5,
      )
 
-    # make_insertion_points returns a flat xyz array/list, so the number of
-    # insertion points is total scalar count / 3.  The C++ sampler uses
-    # V_sampler = n_points * spacing^3 for the Adams parameter.
-    n_insertion_points = int(np.asarray(pts).size // 3)
-    sampler_volume = float(n_insertion_points * spacing**3)
+    #gci
+    gci_cfg = config.get("gci", {})
+
+    def gci_pick(key, default):
+        return gci_cfg.get(key, default)
+
+    mu_bulk_override = gci_pick("mu_bulk", None)
+    mu_bulk, mu_bulk_water_model, mu_bulk_source = resolve_mu_bulk(
+        None if mu_bulk_override is None else float(mu_bulk_override)
+    )
+
     start = time.time()
-    save_path = f"{project_path}/frames/"
-    os.makedirs(save_path, exist_ok=True)
-    print("Performing TITRATION and GRAND CANONICAL INTEGRATION")    
-    mc.run_mcswell(
-        parametrized_atoms, 
-        pts,
-        distance_cutoff,
-        spacing,
-        n_gcmc_steps,
-        n_equilibration_steps, 
-        save_path, 
-        mu_values,
-        n_snapshots)
+    print("Performing TITRATION and GRAND CANONICAL INTEGRATION")
+    # Runs the GCMC titration and the requested free-energy analyses in one
+    # C++ call, entirely in memory: no per-snapshot PDB is written to disk
+    # (pass dump_debug_pdbs=True below for that, e.g. for visual inspection
+    # in PyMOL/VMD -- it writes under project_path/mu_###/snap_#####.pdb).
+    result = mc.run_mcswell_and_analyze(
+        receptor_points=parametrized_atoms,
+        boundaries=pts,
+        distance_cutoff=distance_cutoff,
+        spacing=spacing,
+        gcmc_steps=n_gcmc_steps,
+        equilibration_steps=n_equilibration_steps,
+        save_path=project_path,
+        mu_values=mu_values,
+        n_snapshots=n_snapshots,
+        temperature=float(gci_pick("temperature", 300.0)),
+        mu_bulk=mu_bulk,
+        box_center=[center_x, center_y, center_z],
+        box_halfsize=[x_size / 2.0, y_size / 2.0, z_size / 2.0],
+        run_binomial=energy_estimation_method in ("binomial", "both"),
+        run_gci=energy_estimation_method in ("gci", "both"),
+        peak_percentile=float(gci_pick("peak_percentile", 90.0)),
+        capacity_filter=bool(gci_pick("capacity_filter", True)),
+        bulk_water_density=float(gci_pick("bulk_water_density", 0.0334)),
+        max_capacity_hit_fraction=float(gci_pick("max_capacity_hit_fraction", 0.01)),
+        max_mean_capacity_fraction=float(gci_pick("max_mean_capacity_fraction", 0.90)),
+        local_radius=float(gci_pick("local_radius", 1.4)),
+        local_volume_mode=str(gci_pick("local_volume_mode", "sampler")),
+        region_max_terms=int(gci_pick("region_max_terms", 12)),
+        local_max_terms=int(gci_pick("local_max_terms", 4)),
+        random_starts=int(gci_pick("random_starts", 64)),
+        fit_seed=int(gci_pick("seed", 20260812)),
+    )
 
     exec_time = time.time() - start
     print(f"Time necessary for the C++ part: {exec_time/60} minutes - {exec_time} seconds")
-    return {
-        "n_insertion_points": n_insertion_points,
-        "sampler_volume": sampler_volume,
-    }
+    print(
+        f"[mu_bulk] resolved to {mu_bulk:.6f} kcal/mol "
+        f"(water model: {mu_bulk_water_model or 'undetected'}, source: {mu_bulk_source})"
+    )
+    result["mu_bulk"] = mu_bulk
+    return result
 
 
 def build_parser():
@@ -398,14 +424,14 @@ if __name__ == "__main__":
         config = tomllib.load(fi)
     project_path_base = config["io"]["save_path"]
     print("Starting")
-    run_info = run_mcswell(config, project_path_base)
+    run_info = run_mcswell(
+        config, project_path_base, energy_estimation_method=args.energy_estimation_method
+    )
 
-    if args.energy_estimation_method in ("binomial", "both"):
-        fe.main(
-            config,
-            sampler_volume=run_info["sampler_volume"])
-    if args.energy_estimation_method in ("gci", "both"):
-        fe_gci.main(
-            config,
-            sampler_volume=run_info["sampler_volume"]
-        )
+    # The titration + free-energy fits already ran (in C++, in memory) as
+    # part of run_mcswell() above; this just draws the diagnostic plots
+    # from the small CSVs it wrote.
+    if run_info["binomial_output_dir"]:
+        fe.main(run_info["binomial_output_dir"], mu_bulk=run_info["mu_bulk"])
+    if run_info["gci_output_dir"]:
+        fe_gci.main(run_info["gci_output_dir"])

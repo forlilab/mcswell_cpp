@@ -134,8 +134,10 @@ void test_gci_analysis_end_to_end() {
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/region_titration.csv"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/local_titration.csv"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/region_gci_pmf.csv"));
+    MCSWELL_CHECK(std::filesystem::exists(out_dir + "/region_gci_model.csv"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/sites.csv"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/local_gci_sites.csv"));
+    MCSWELL_CHECK(std::filesystem::exists(out_dir + "/local_gci_models.csv"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/sites.pdb"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/gO.dx"));
     MCSWELL_CHECK(std::filesystem::exists(out_dir + "/gci_metadata.json"));
@@ -147,6 +149,10 @@ void test_gci_analysis_end_to_end() {
     const auto pmf = read_file(out_dir + "/region_gci_pmf.csv");
     MCSWELL_CHECK(pmf.find("\n0,") != std::string::npos); // N=0 row present
     MCSWELL_CHECK(pmf.find("\n3,") != std::string::npos); // N=3 row present
+
+    const auto model_csv = read_file(out_dir + "/region_gci_model.csv");
+    MCSWELL_CHECK(model_csv.find("term,amplitude,slope,center,n_min,n_max") == 0);
+    MCSWELL_CHECK(model_csv.find("\n0,") != std::string::npos); // at least one term row
 
     const auto meta = read_file(out_dir + "/gci_metadata.json");
     MCSWELL_CHECK(meta.find("\"region_fit_N_min\": 0") != std::string::npos);

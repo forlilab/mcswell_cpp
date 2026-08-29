@@ -491,6 +491,28 @@ std::string run_gci_analysis(
             return rows;
         }());
 
+    // Fitted model parameters, so the Python plotting layer can redraw the
+    // fitted N(B) curve (predict(B) = n_min + sum_j amp_j*sigmoid(slope_j*
+    // (B-center_j))) without re-running the fit -- this table plus n_min/
+    // n_max is the only thing needed to reconstruct it, and the sigmoid
+    // itself is a one-line formula, safe to re-evaluate in Python for
+    // plotting purposes only (see estimate_free_energies_GCI.py).
+    write_csv_table(
+        out_dir + "/region_gci_model.csv", {"term", "amplitude", "slope", "center", "n_min", "n_max"}, [&] {
+            std::vector<std::vector<std::string>> rows;
+            for (std::size_t j = 0; j < region_model.amplitudes.size(); ++j) {
+                rows.push_back({
+                    std::to_string(j),
+                    format_csv_double(region_model.amplitudes[j]),
+                    format_csv_double(region_model.slopes[j]),
+                    format_csv_double(region_model.centers[j]),
+                    format_csv_double(region_model.n_min),
+                    format_csv_double(region_model.n_max),
+                });
+            }
+            return rows;
+        }());
+
     double local_analysis_volume = sampler_volume;
     if (cfg.local_volume_mode == "standard") {
         local_analysis_volume = standard_volume;
@@ -508,6 +530,7 @@ std::string run_gci_analysis(
     std::vector<int> site_terms(n_sites, 0);
     std::vector<double> site_n_min(n_sites, std::numeric_limits<double>::quiet_NaN());
     std::vector<double> site_n_max(n_sites, std::numeric_limits<double>::quiet_NaN());
+    std::vector<std::vector<double>> site_amplitudes(n_sites), site_slopes(n_sites), site_model_centers(n_sites);
 
     for (std::size_t s = 0; s < n_sites; ++s) {
         std::vector<double> y_fit(B_fit.size());
@@ -538,6 +561,9 @@ std::string run_gci_analysis(
             site_terms[s] = static_cast<int>(model.amplitudes.size());
             site_n_min[s] = model.n_min;
             site_n_max[s] = model.n_max;
+            site_amplitudes[s] = model.amplitudes;
+            site_slopes[s] = model.slopes;
+            site_model_centers[s] = model.centers;
 
             const auto pmf = gci_pmf(model, B_fit, kT, local_analysis_volume, standard_volume, cfg.mu_bulk);
             const auto score = first_water_score_from_pmf(pmf);
@@ -601,6 +627,28 @@ std::string run_gci_analysis(
         }
         write_csv_table(out_dir + "/sites.csv", headers, rows);
         write_csv_table(out_dir + "/local_gci_sites.csv", headers, rows);
+    }
+
+    // Per-site fitted model parameters (only rows for sites that actually
+    // fit -- see region_gci_model.csv above for the format/rationale).
+    {
+        std::vector<std::vector<std::string>> rows;
+        for (std::size_t s = 0; s < n_sites; ++s) {
+            for (std::size_t j = 0; j < site_amplitudes[s].size(); ++j) {
+                rows.push_back({
+                    std::to_string(s),
+                    std::to_string(j),
+                    format_csv_double(site_amplitudes[s][j]),
+                    format_csv_double(site_slopes[s][j]),
+                    format_csv_double(site_model_centers[s][j]),
+                    format_csv_double(site_n_min[s]),
+                    format_csv_double(site_n_max[s]),
+                });
+            }
+        }
+        write_csv_table(
+            out_dir + "/local_gci_models.csv", {"site", "term", "amplitude", "slope", "center", "n_min", "n_max"},
+            rows);
     }
 
     {
