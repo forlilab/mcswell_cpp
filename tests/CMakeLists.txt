@@ -19,6 +19,7 @@ add_executable(mcswell_analysis_tests
     analysis/test_main.cpp
     analysis/test_kdtree.cpp
     analysis/test_frame_extraction.cpp
+    analysis/test_density_grid.cpp
 )
 
 target_link_libraries(mcswell_analysis_tests PRIVATE mcswell_analysis)

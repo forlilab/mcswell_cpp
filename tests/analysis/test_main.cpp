@@ -23,10 +23,12 @@
 // harness.hpp for why this project doesn't pull in a test framework.
 void run_kdtree_tests();
 void run_frame_extraction_tests();
+void run_density_grid_tests();
 
 int main() {
     run_kdtree_tests();
     run_frame_extraction_tests();
+    run_density_grid_tests();
 
     if (g_mcswell_test_failures == 0) {
         std::cout << "[PASS] all analysis unit tests passed\n";
