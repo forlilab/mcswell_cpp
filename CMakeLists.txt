@@ -19,22 +19,107 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-# Must be set BEFORE project() so CMake uses it during CUDA compiler detection.
-# Native (SASS) code for every desktop/datacenter architecture from Maxwell
-# through Hopper, which every CUDA >= 12.0 toolkit can target, plus a
-# PTX-only ("virtual") fallback for the newest of them (Hopper). PTX is
-# forward-compatible: a GPU newer than anything listed here (e.g. Blackwell,
-# or an architecture that doesn't exist yet) will JIT-compile that PTX at
-# first kernel launch instead of failing with "no kernel image is available
-# for this device."
+# ---------------------------------------------------------------------------
+# CUDA architecture selection.
+#
+# This must be resolved BEFORE project(), because CMake already passes
+# -gencode flags during CUDA compiler detection: a bad value there fails as
+# "Check for working CUDA compiler ... broken" instead of as a normal error.
+#
+# Do NOT hardcode a list and do NOT simply skip this when the variable is
+# already set. Which architectures nvcc accepts changes between toolkit major
+# versions (CUDA 13 dropped Maxwell/Pascal/Volta, i.e. everything below
+# compute_75), and CMake's own "all" keyword expands from a built-in table
+# that can disagree with the installed toolkit. Either one produces
+#     nvcc fatal : Unsupported gpu architecture 'compute_50'
+# Environments frequently inject a value (CMAKE_ARGS / CUDAARCHS / -D from a
+# build frontend such as scikit-build-core), so we always ask the toolkit what
+# it really supports and then validate/repair the requested value.
 #
 # Override at configure time for a specific build, e.g.:
-#   -DCMAKE_CUDA_ARCHITECTURES=native        (only the GPU(s) present locally)
-#   -DCMAKE_CUDA_ARCHITECTURES="90;100;120"  (add native Blackwell codegen,
-#                                              requires CUDA >= 12.8)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES "50;60;70;75;80;86;89;90;90-virtual")
+#   -DCMAKE_CUDA_ARCHITECTURES=native   (only the GPU(s) present locally)
+#   -DCMAKE_CUDA_ARCHITECTURES="90;120" (an explicit subset; still validated)
+# ---------------------------------------------------------------------------
+if(DEFINED CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}")
+  set(_mcswell_nvcc "${CMAKE_CUDA_COMPILER}")
+elseif(DEFINED ENV{CUDACXX} AND EXISTS "$ENV{CUDACXX}")
+  set(_mcswell_nvcc "$ENV{CUDACXX}")
+else()
+  find_program(_mcswell_nvcc NAMES nvcc HINTS ENV CUDA_HOME ENV CUDA_PATH
+               PATH_SUFFIXES bin)
 endif()
+
+set(_mcswell_arch_supported "")
+if(_mcswell_nvcc)
+  execute_process(
+    COMMAND "${_mcswell_nvcc}" --list-gpu-arch
+    OUTPUT_VARIABLE _mcswell_nvcc_out
+    RESULT_VARIABLE _mcswell_nvcc_res
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+  if(_mcswell_nvcc_res EQUAL 0)
+    string(REGEX MATCHALL "compute_[0-9]+" _mcswell_arch_matches "${_mcswell_nvcc_out}")
+    foreach(_mcswell_arch IN LISTS _mcswell_arch_matches)
+      string(REGEX REPLACE "^compute_" "" _mcswell_arch "${_mcswell_arch}")
+      list(APPEND _mcswell_arch_supported "${_mcswell_arch}")
+    endforeach()
+  endif()
+endif()
+
+if(_mcswell_arch_supported)
+  list(REMOVE_DUPLICATES _mcswell_arch_supported)
+  list(SORT _mcswell_arch_supported COMPARE NATURAL)
+else()
+  # nvcc could not be queried (too old for --list-gpu-arch, or not found yet).
+  # Fall back to the range every supported toolkit (CUDA >= 12.0) accepts.
+  set(_mcswell_arch_supported "75;80;86;89;90")
+endif()
+
+string(TOLOWER "${CMAKE_CUDA_ARCHITECTURES}" _mcswell_arch_request)
+
+if(_mcswell_arch_request STREQUAL "native")
+  # Resolved by nvcc against the local GPU; nothing to validate here.
+elseif(NOT _mcswell_arch_request
+       OR _mcswell_arch_request STREQUAL "all"
+       OR _mcswell_arch_request STREQUAL "all-major")
+  # Native (SASS) code for every architecture this toolkit supports, plus a
+  # PTX-only ("virtual") fallback for the newest one. PTX is forward
+  # compatible, so a GPU newer than anything listed here JIT-compiles that PTX
+  # at first kernel launch instead of failing with "no kernel image is
+  # available for this device".
+  list(GET _mcswell_arch_supported -1 _mcswell_arch_newest)
+  set(_mcswell_arch_final ${_mcswell_arch_supported} "${_mcswell_arch_newest}-virtual")
+  set(CMAKE_CUDA_ARCHITECTURES "${_mcswell_arch_final}"
+      CACHE STRING "CUDA architectures to generate device code for" FORCE)
+else()
+  set(_mcswell_arch_final "")
+  set(_mcswell_arch_dropped "")
+  foreach(_mcswell_arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    string(REGEX MATCH "^[0-9]+" _mcswell_arch_num "${_mcswell_arch}")
+    if(_mcswell_arch_num AND _mcswell_arch_num IN_LIST _mcswell_arch_supported)
+      list(APPEND _mcswell_arch_final "${_mcswell_arch}")
+    else()
+      list(APPEND _mcswell_arch_dropped "${_mcswell_arch}")
+    endif()
+  endforeach()
+
+  if(_mcswell_arch_dropped)
+    message(WARNING
+      "Ignoring CUDA architecture(s) '${_mcswell_arch_dropped}': not supported "
+      "by ${_mcswell_nvcc} (supports ${_mcswell_arch_supported}).")
+  endif()
+
+  if(NOT _mcswell_arch_final)
+    list(GET _mcswell_arch_supported -1 _mcswell_arch_newest)
+    set(_mcswell_arch_final ${_mcswell_arch_supported} "${_mcswell_arch_newest}-virtual")
+  endif()
+
+  set(CMAKE_CUDA_ARCHITECTURES "${_mcswell_arch_final}"
+      CACHE STRING "CUDA architectures to generate device code for" FORCE)
+endif()
+
+message(STATUS "MCSwell: CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 project(mcswell_cpp LANGUAGES CXX CUDA)
 
@@ -151,6 +236,43 @@ target_link_libraries(_mcswell_cpp PRIVATE
     CUDA::cudart
     CUDA::curand
     mcswell_analysis
+)
+
+if (NOT MSVC)
+  target_compile_options(_mcswell_cpp PRIVATE -O3 -Wall -Wextra -Wpedantic)
+endif()
+
+# --- Water model selection ---
+set(WATER_MODEL "TIP4P" CACHE STRING "Water model: TIP3P or TIP4P")
+set_property(CACHE WATER_MODEL PROPERTY STRINGS TIP3P TIP4P)
+
+if(WATER_MODEL STREQUAL "TIP3P")
+  target_compile_definitions(_mcswell_cpp PRIVATE TIP3P)
+  target_compile_definitions(_mcswell_cpp PRIVATE WATER_MODEL_NAME="${WATER_MODEL}")
+elseif(WATER_MODEL STREQUAL "TIP4P")
+  target_compile_definitions(_mcswell_cpp PRIVATE TIP4P)
+  target_compile_definitions(_mcswell_cpp PRIVATE WATER_MODEL_NAME="${WATER_MODEL}")
+else()
+  message(FATAL_ERROR "Invalid WATER_MODEL='${WATER_MODEL}'. Use TIP3P or TIP4P.")
+endif()
+
+install(TARGETS _mcswell_cpp
+        LIBRARY DESTINATION mcswell_cpp
+        RUNTIME DESTINATION mcswell_cpp
+        ARCHIVE DESTINATION mcswell_cpp.)
+
+set_target_properties(_mcswell_cpp PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/mcswell_cpp"
+)
+
+target_include_directories(_mcswell_cpp PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src   # keep if you still include headers from src (ideally none)
+)
+
+target_link_libraries(_mcswell_cpp PRIVATE
+    CUDA::cudart
+    CUDA::curand
 )
 
 if (NOT MSVC)

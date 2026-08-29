@@ -4,10 +4,10 @@ MCSwell is a new tool to predict hydration sites positions and thermodynamics us
 At the moment MCSwell is not supported on Windows.
 
 # Requirements
-- NVIDIA GPU with CUDA Compute Capability >= 5.0 (Maxwell or newer; CUDA 12.x
-  no longer supports Kepler). GPUs newer than Hopper (compute capability 9.0),
-  including Blackwell, are supported via forward-compatible PTX and do not
-  need to be explicitly listed — see the CMake note below.
+- NVIDIA GPU with a compute capability supported by your CUDA Toolkit (CUDA
+  12.x supports Maxwell 5.0 and newer; CUDA 13.x dropped everything below
+  Turing 7.5). The build queries the toolkit itself, so you do not need to
+  list architectures manually — see the CMake note below.
 - CUDA Toolkit >= 12.0 (enforced at configure time)
 - GCC >= 7 (or any C++17-capable compiler)
 - CMake >= 3.18
@@ -78,6 +78,261 @@ above).
   cuda-driver-dev cuda-nvrtc cuda-nvrtc-dev cuda-profiler-api 2>/dev/null; true
 (mcswell) foo@bar:~$ unset NVCC_PREPEND_FLAGS CXX CC
 (mcswell) foo@bar:~$ ln -sf /usr/bin/strip "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-strip"
+```
+
+> **Note:** This does not affect OpenMM at runtime — it only uses the CUDA shared
+> libraries already installed system-wide by the GPU driver.
+
+Then confirm that `nvcc` now resolves to the **system** installation, not the
+conda environment:
+
+```console
+(mcswell) foo@bar:~$ which nvcc
+/usr/local/cuda/bin/nvcc
+(mcswell) foo@bar:~$ nvcc --version
+```
+
+If `which nvcc` still points to `$CONDA_PREFIX/bin/nvcc`, explicitly set the
+system CUDA toolkit before compiling:
+
+```console
+(mcswell) foo@bar:~$ export CUDA_HOME=/usr/local/cuda
+(mcswell) foo@bar:~$ export CUDACXX=/usr/local/cuda/bin/nvcc
+(mcswell) foo@bar:~$ export PATH=/usr/local/cuda/bin:$PATH
+```
+
+### Option B: build entirely inside the conda/micromamba environment (no sudo, no system CUDA needed)
+
+Instead of removing conda's CUDA packages, install a *complete, matched* CUDA
+toolchain directly into the same environment, so `nvcc` and its headers stay
+fully self-contained and never touch (or conflict with) the system's glibc.
+This never requires root and works even on machines with no system-wide CUDA
+Toolkit at all.
+
+**This only works if you get one thing right: `cuda-version` must not exceed
+what your GPU driver actually supports**, or the build will succeed but
+OpenMM will fail at runtime with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`. Check
+the ceiling first:
+
+```console
+(mcswell) foo@bar:~$ nvidia-smi | head -3
+# ... | Driver Version: 570.211.01   CUDA Version: 12.8 |
+```
+
+Use that reported version (`12.8` in this example, not higher) for
+`cuda-version` below:
+
+```console
+(mcswell) foo@bar:~$ conda install -c conda-forge "cuda-version=12.8" \
+  gcc_linux-64 gxx_linux-64 cuda-nvcc cuda-crt cuda-cudart-dev libcurand-dev -y
+```
+
+`gcc_linux-64`/`gxx_linux-64` matter here: they bring conda's own bundled,
+version-matched sysroot, so `nvcc` compiles against *that* instead of falling
+through to the system's (possibly newer, incompatible) glibc headers — that
+fallback is exactly what causes the errors from issue #4. `cuda-crt` and
+`cuda-cudart-dev`/`libcurand-dev` provide the headers the plain `cuda-nvcc`
+metapackage doesn't include on its own.
+
+The `mcswell_cpp` build will print a CMake warning that `nvcc` resolves into a
+conda/mamba environment — that warning exists to flag the issue-#4 failure
+mode; with this exact package set it's a known, harmless false positive.
+
+# Compilation
+To compile the C++ application with default settings (TIP3P ff):
+
+```console
+(mcswell) foo@bar:~$ cd /path/to/mcswell_cpp
+(mcswell) foo@bar/mcswell_cpp:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults"
+```
+
+To change the water model used:
+ modify the field "WATER MODEL" in CMakePresets.json
+
+As of now only TIP3P and TIP4P water models are available.
+
+## GPU architecture / CUDA compatibility
+
+By default, MCSwell asks your CUDA Toolkit which architectures it supports
+(`nvcc --list-gpu-arch`) and builds native (SASS) code for all of them, plus a
+PTX ("virtual") fallback for the newest one. Thanks to PTX's forward
+compatibility, the resulting build also runs on GPUs newer than anything the
+toolkit knows about — the driver JIT-compiles the fallback PTX the first time
+a kernel is launched (a one-time delay on first run, no rebuild needed).
+
+Because the list is derived from the toolkit at configure time, upgrading CUDA
+never leaves a stale, unsupported architecture behind. This matters because the
+supported set changes between major versions: CUDA 13 removed Maxwell, Pascal
+and Volta, so a hardcoded `50`/`60`/`70` (or CMake's `all` keyword, which
+expands from CMake's own built-in table) makes even compiler detection fail
+with:
+
+```
+nvcc fatal   : Unsupported gpu architecture 'compute_50'
+```
+
+If a value is supplied by your environment or command line, MCSwell validates
+it against the toolkit and drops entries `nvcc` cannot compile, warning about
+each one. The architectures actually used are printed at configure time:
+
+```
+-- MCSwell: CUDA architectures: 75;80;86;87;88;89;90;100;103;110;120;121;121-virtual
+```
+
+To shorten build times you can restrict the list explicitly (it is still
+validated):
+
+```console
+(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults -DCMAKE_CUDA_ARCHITECTURES=90;100;120"
+```
+
+Or build only for the GPU(s) actually present on the machine:
+
+```console
+(mcswell) foo@bar:~$ pip install -e . -v --config-settings=cmake.args="--preset defaults -DCMAKE_CUDA_ARCHITECTURES=native"
+```
+
+The build fails fast with a clear error if your CUDA Toolkit is below the
+required 12.0 floor, instead of failing later with a confusing compiler error.
+
+> **Known issue:** some CUDA >= 12.0 installations (reported with CUDA 12.6
+> on Ubuntu 24.04/GCC 13) fail during CMake's own compiler-detection step with
+> `_Float64`/`_Float128`/`issignaling` errors from glibc headers. This has
+> been verified to **not** reproduce with CUDA 12.0 on the same Ubuntu
+> 24.04/glibc 2.39/GCC 13.3 combination, so it looks specific to certain CUDA
+> point releases (or to a conda/pip-provided `nvcc` shadowing the system one —
+> see the note above about removing conda CUDA packages). If you hit this,
+> please open an issue with `which nvcc`, `nvcc --version`, and your full
+> error log.
+
+# Config file
+You can find an example of the configuration file in tests (config.toml)
+
+## Configuration schema
+
+### Top-level
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `title` | ✓ | string | non-empty | `"TOML configuration file for MCSwell"` |
+
+---
+
+### `[io]`
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `io.save_path` | ✓ | string | valid directory path | `"/data/phd/mcswell_case_study/mcswell_gci/scytalone/3std_monomer_clean_rep_0"` |
+
+---
+
+### `[receptor]` (optional)
+
+Used when hydrating a **protein receptor**.  
+Omit this section for ligand-only hydration.
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `receptor.path` | ✓* | array[string] | ≥1 file; `.pdb`, `.cif`, `.mmcif` | `["3std_monomer_clean.pdb"]` |
+
+\* Required **only if** `[receptor]` section is present.
+
+---
+
+### `[ligand]` (optional)
+
+Used when hydrating a **small molecule ligand**.  
+Omit this section for receptor-only hydration.
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `ligand.small_molecule_path` | ✓* | array[string] | ≥1 file; `.sdf`, `.mol2` | `["3std_monomer_clean_ligand.sdf"]` |
+| `ligand.small_molecule_forcefield` | ✓* | string | supported forcefield name | `"gaff"` |
+
+\* Required **only if** `[ligand]` section is present.
+
+---
+
+### `[simulation_parameters]`
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `simulation_parameters.n_snapshots` | ✓ | int | ≥ 1 | `1000` |
+| `simulation_parameters.n_equilibration_steps` | ✓ | int | 0 ≤ value ≤ `n_gcmc_steps` | `5000000` |
+| `simulation_parameters.n_gcmc_steps` | ✓ | int | ≥ 1 | `50000000` |
+| `simulation_parameters.distance_cutoff` | ✓ | float | > 0 Å | `9.0` |
+
+---
+
+### `[mu_range]`
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `mu_range.start` | ✓ | float | `< stop` | `-38.0` |
+| `mu_range.stop` | ✓ | float | `> start` | `2.0` |
+| `mu_range.step` | ✓ | float | > 0 | `1.0` |
+
+---
+
+### `[gci]`
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `gci.peak_percentile` | ✓ | float | 0 < value ≤ 100 | `90.0` |
+
+---
+
+### `[simulation_box]`
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `simulation_box.spacing` | ✓ | float | > 0 Å | `0.375` |
+| `simulation_box.center_x` | ✓ | float | finite | `27.61085` |
+| `simulation_box.center_y` | ✓ | float | finite | `10.1136` |
+| `simulation_box.center_z` | ✓ | float | finite | `33.31735` |
+| `simulation_box.x_size` | ✓ | float | > 0 Å | `29.1773` |
+| `simulation_box.y_size` | ✓ | float | > 0 Å | `27.1828` |
+| `simulation_box.z_size` | ✓ | float | > 0 Å | `30.4509` |
+
+---
+
+### Cross-field validation rules
+
+| Rule |
+|------|
+| At least one of `[receptor]` or `[ligand]` must be present |
+| `[receptor]` and `[ligand]` may both be present |
+| `n_gcmc_steps >= n_equilibration_steps` |
+| `mu_range.start < mu_range.stop` |
+| `mu_range.step > 0` |
+| `spacing > 0` |
+| `x_size > 0`, `y_size > 0`, `z_size > 0` |
+
+
+
+# Execution
+To run MCSwell:
+
+```console
+(mcswell) foo@bar:~$ python /path_to_mcswell_cpp/python/run_mcswell.py --config <path_to_the_config_file>
+```
+
+By default this runs the GCMC titration and both free-energy post-processing
+methods (ProtoMS-style GCI and the independent-site binomial fit). Restrict
+to a single method with `--energy-estimation-method`:
+
+```console
+(mcswell) foo@bar:~$ python /path_to_mcswell_cpp/python/run_mcswell.py \
+    --config <path_to_the_config_file> \
+    --energy-estimation-method gci
+```
+
+Accepted values are `gci`, `binomial`, or `both` (default).
+
+You can run the example provided in the `example` folder:
+
+```console
+(mcswell) foo@bar:~$ python python/run_mcswell.py --config example/config.toml
 ```
 
 > **Note:** This does not affect OpenMM at runtime — it only uses the CUDA shared
