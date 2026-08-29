@@ -24,6 +24,7 @@ add_executable(mcswell_analysis_tests
     analysis/test_binomial_fit.cpp
     analysis/test_levenberg_marquardt.cpp
     analysis/test_gci_fit.cpp
+    analysis/test_writers.cpp
 )
 
 target_link_libraries(mcswell_analysis_tests PRIVATE mcswell_analysis)
