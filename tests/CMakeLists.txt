@@ -20,6 +20,8 @@ add_executable(mcswell_analysis_tests
     analysis/test_kdtree.cpp
     analysis/test_frame_extraction.cpp
     analysis/test_density_grid.cpp
+    analysis/test_root_finding.cpp
+    analysis/test_binomial_fit.cpp
 )
 
 target_link_libraries(mcswell_analysis_tests PRIVATE mcswell_analysis)

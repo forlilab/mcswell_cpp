@@ -24,11 +24,15 @@
 void run_kdtree_tests();
 void run_frame_extraction_tests();
 void run_density_grid_tests();
+void run_root_finding_tests();
+void run_binomial_fit_tests();
 
 int main() {
     run_kdtree_tests();
     run_frame_extraction_tests();
     run_density_grid_tests();
+    run_root_finding_tests();
+    run_binomial_fit_tests();
 
     if (g_mcswell_test_failures == 0) {
         std::cout << "[PASS] all analysis unit tests passed\n";
