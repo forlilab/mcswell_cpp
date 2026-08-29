@@ -57,4 +57,24 @@ void write_sites_pdb(
 // OpenDX volumetric density map for visualization (e.g. in PyMOL/VMD).
 void density_to_dx(const DensityGrid& grid, const std::string& path);
 
+// Minimal flat-object JSON writer, for the small metadata dicts written
+// alongside each analysis (binomial_metadata.json, gci_metadata.json).
+// Not a general JSON library: no nesting, no arrays -- the pipeline's
+// metadata objects are, and only need to be, flat key/value maps.
+class JsonWriter {
+public:
+    JsonWriter& add(const std::string& key, double value);
+    JsonWriter& add(const std::string& key, long long value);
+    JsonWriter& add(const std::string& key, bool value);
+    JsonWriter& add(const std::string& key, const std::string& value);
+    JsonWriter& add_null(const std::string& key);
+
+    void write(const std::string& path) const;
+
+private:
+    void comma_and_key(const std::string& key);
+    std::string body_;
+    bool first_ = true;
+};
+
 } // namespace mcswell::analysis

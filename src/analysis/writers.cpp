@@ -108,4 +108,58 @@ void density_to_dx(const DensityGrid& grid, const std::string& path) {
     f << "component \"data\" value 3\n";
 }
 
+namespace {
+std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+} // namespace
+
+void JsonWriter::comma_and_key(const std::string& key) {
+    if (!first_) body_ += ",\n";
+    first_ = false;
+    body_ += "  \"" + json_escape(key) + "\": ";
+}
+
+JsonWriter& JsonWriter::add(const std::string& key, double value) {
+    comma_and_key(key);
+    body_ += format_csv_double(value);
+    return *this;
+}
+
+JsonWriter& JsonWriter::add(const std::string& key, long long value) {
+    comma_and_key(key);
+    body_ += std::to_string(value);
+    return *this;
+}
+
+JsonWriter& JsonWriter::add(const std::string& key, bool value) {
+    comma_and_key(key);
+    body_ += value ? "true" : "false";
+    return *this;
+}
+
+JsonWriter& JsonWriter::add(const std::string& key, const std::string& value) {
+    comma_and_key(key);
+    body_ += "\"" + json_escape(value) + "\"";
+    return *this;
+}
+
+JsonWriter& JsonWriter::add_null(const std::string& key) {
+    comma_and_key(key);
+    body_ += "null";
+    return *this;
+}
+
+void JsonWriter::write(const std::string& path) const {
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("unable to create file: " + path);
+    f << "{\n" << body_ << "\n}\n";
+}
+
 } // namespace mcswell::analysis

@@ -99,6 +99,26 @@ void test_density_to_dx_header() {
     std::remove(path.c_str());
 }
 
+void test_json_writer() {
+    const std::string path = "/tmp/mcswell_test_metadata.json";
+    mcswell::analysis::JsonWriter w;
+    w.add("method", std::string("binomial"))
+        .add("temperature_K", 300.0)
+        .add("n_sites", static_cast<long long>(5))
+        .add("capacity_filter_enabled", true)
+        .add_null("mu_bulk_water_model");
+    w.write(path);
+
+    const std::string content = read_file(path);
+    MCSWELL_CHECK(content.find("\"method\": \"binomial\"") != std::string::npos);
+    MCSWELL_CHECK(content.find("\"temperature_K\": 300") != std::string::npos);
+    MCSWELL_CHECK(content.find("\"n_sites\": 5") != std::string::npos);
+    MCSWELL_CHECK(content.find("\"capacity_filter_enabled\": true") != std::string::npos);
+    MCSWELL_CHECK(content.find("\"mu_bulk_water_model\": null") != std::string::npos);
+    MCSWELL_CHECK(content.front() == '{');
+    std::remove(path.c_str());
+}
+
 } // namespace
 
 void run_writers_tests() {
@@ -106,4 +126,5 @@ void run_writers_tests() {
     test_write_csv_table_roundtrip();
     test_write_sites_pdb_format();
     test_density_to_dx_header();
+    test_json_writer();
 }
