@@ -99,6 +99,7 @@ target_include_directories(nanoflann INTERFACE "${nanoflann_SOURCE_DIR}/include"
 # tested with a plain C++ compiler, without a CUDA toolchain or GPU.
 add_library(mcswell_analysis STATIC
     src/analysis/kdtree.cpp
+    src/analysis/frame_extraction.cpp
 )
 
 target_include_directories(mcswell_analysis PUBLIC

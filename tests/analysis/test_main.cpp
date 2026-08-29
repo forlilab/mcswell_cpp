@@ -22,9 +22,11 @@
 // One `run_*_tests()` per test_*.cpp file, registered here by hand -- see
 // harness.hpp for why this project doesn't pull in a test framework.
 void run_kdtree_tests();
+void run_frame_extraction_tests();
 
 int main() {
     run_kdtree_tests();
+    run_frame_extraction_tests();
 
     if (g_mcswell_test_failures == 0) {
         std::cout << "[PASS] all analysis unit tests passed\n";
