@@ -29,6 +29,7 @@ void run_binomial_fit_tests();
 void run_levenberg_marquardt_tests();
 void run_gci_fit_tests();
 void run_writers_tests();
+void run_pipeline_analysis_tests();
 
 int main() {
     run_kdtree_tests();
@@ -39,6 +40,7 @@ int main() {
     run_levenberg_marquardt_tests();
     run_gci_fit_tests();
     run_writers_tests();
+    run_pipeline_analysis_tests();
 
     if (g_mcswell_test_failures == 0) {
         std::cout << "[PASS] all analysis unit tests passed\n";

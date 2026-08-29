@@ -50,7 +50,7 @@ inline void cuda_check(cudaError_t e, const char* what) {
 // - create RNG states (1 per mu)
 // - launch the CUDA kernel (1 block per mu, 512 threads)
 // - read back snapshots and return
-std::vector<float> run_mcswell_gpu_titration(
+TitrationResult run_mcswell_gpu_titration(
     const std::vector<Atom>& receptor_points,
     const float* insertion_points_xyz,   // length = 3*n_points
     std::size_t n_points,
@@ -58,10 +58,11 @@ std::vector<float> run_mcswell_gpu_titration(
     float spacing,
     std::size_t gcmc_steps,
     std::size_t equilibration_steps,
-    const std::string& save_path,        // unused in this in-memory version
+    const std::string& save_path,        // only used if dump_debug_pdbs is set
     const std::vector<float>& mu_values,
     std::size_t n_snapshots,
-    std::uint64_t seed
+    std::uint64_t seed,
+    bool dump_debug_pdbs
 ) {
     // -------------------------
     // Input checks
@@ -236,13 +237,15 @@ std::vector<float> run_mcswell_gpu_titration(
 
     cuda_check(cudaDeviceSynchronize(), "sync before inspection");
 
-    mcswell::save_pdbs_by_mu_snapshot(
-        h_snapshots,
-        (std::size_t)n_mu,
-        (std::size_t)n_snapshots,
-        (std::size_t)target_n_waters,
-        save_path
-    );
+    if (dump_debug_pdbs) {
+        mcswell::save_pdbs_by_mu_snapshot(
+            h_snapshots,
+            (std::size_t)n_mu,
+            (std::size_t)n_snapshots,
+            (std::size_t)target_n_waters,
+            save_path
+        );
+    }
 
     // -------------------------
     // Cleanup
@@ -256,5 +259,8 @@ std::vector<float> run_mcswell_gpu_titration(
     cudaFree(d_receptor);
     cudaFree(d_boundaries);
 
-    return h_snapshots;
+    TitrationResult result;
+    result.snapshots = std::move(h_snapshots);
+    result.target_n_waters = static_cast<std::size_t>(target_n_waters);
+    return result;
 }

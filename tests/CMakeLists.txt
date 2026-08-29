@@ -25,6 +25,7 @@ add_executable(mcswell_analysis_tests
     analysis/test_levenberg_marquardt.cpp
     analysis/test_gci_fit.cpp
     analysis/test_writers.cpp
+    analysis/test_pipeline_analysis.cpp
 )
 
 target_link_libraries(mcswell_analysis_tests PRIVATE mcswell_analysis)

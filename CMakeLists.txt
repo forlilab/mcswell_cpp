@@ -104,6 +104,7 @@ add_library(mcswell_analysis STATIC
     src/analysis/binomial_fit.cpp
     src/analysis/gci_fit.cpp
     src/analysis/writers.cpp
+    src/analysis/pipeline_analysis.cpp
 )
 
 target_include_directories(mcswell_analysis PUBLIC
@@ -112,6 +113,10 @@ target_include_directories(mcswell_analysis PUBLIC
 
 target_link_libraries(mcswell_analysis PUBLIC nanoflann)
 target_compile_features(mcswell_analysis PUBLIC cxx_std_17)
+
+# Linked into the _mcswell_cpp shared module below, so it must be built as
+# position-independent code even though it's a static library.
+set_target_properties(mcswell_analysis PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if (NOT MSVC)
   target_compile_options(mcswell_analysis PRIVATE -O3 -Wall -Wextra -Wpedantic)
@@ -128,6 +133,7 @@ pybind11_add_module(_mcswell_cpp
     src/bindings.cpp
     src/insertion_points.cpp
     src/run_mcswell.cpp
+    src/pipeline.cpp
     src/cuda/cuda_kernels.cu
     src/cuda/launch.cu
 )
