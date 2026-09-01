@@ -26,9 +26,27 @@
 
 struct Atom;
 
-// CUDA dummy: returns flat snapshots buffer on host
-// Layout is whatever your kernel produces; keep it consistent with Python reshape.
-std::vector<float> run_mcswell_gpu_titration(
+// Host copy of the titration kernel's full snapshot buffer, plus the
+// sizing the caller needs to index into it (n_mu/n_snapshots are already
+// known to the caller from its own inputs; target_n_waters is derived
+// on the C++ side from n_points/spacing/BULK_WATER_DENSITY and previously
+// had to be reconstructed independently on the Python side to size the
+// water-buffer capacity for post-processing).
+struct TitrationResult {
+    std::vector<float> snapshots;
+    std::size_t target_n_waters = 0;
+};
+
+// Layout of `snapshots` is whatever the kernel produces; keep it
+// consistent with mcswell::analysis::extract_oxygen_frames() and
+// include/cuda/consts.cuh's water-buffer offsets.
+//
+// `dump_debug_pdbs`: if true, also writes one PDB per (mu, snapshot) under
+// save_path/frames/ for visual inspection (PyMOL/VMD). Off by default --
+// the in-memory `snapshots` buffer is sufficient for post-processing, so
+// a full run no longer needs to touch disk for anything but the final,
+// small result artifacts.
+TitrationResult run_mcswell_gpu_titration(
     const std::vector<Atom>& receptor_points,
     const float* insertion_points_xyz,   // length = 3*n_points
     std::size_t n_points,
@@ -39,5 +57,6 @@ std::vector<float> run_mcswell_gpu_titration(
     const std::string& save_path,
     const std::vector<float>& mu_values,
     std::size_t n_snapshots,
-    std::uint64_t seed = 12345ULL
+    std::uint64_t seed = 12345ULL,
+    bool dump_debug_pdbs = false
 );

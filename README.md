@@ -13,6 +13,11 @@ At the moment MCSwell is not supported on Windows.
 - CMake >= 3.18
 - Ninja build system
 - Python >= 3.9
+- Network access the first time you configure the build: CMake fetches
+  [nanoflann](https://github.com/jlblancoc/nanoflann) (a small header-only
+  KD-tree library used by the post-simulation hydration-site analysis) via
+  `FetchContent`. It's cached under the build directory afterward, so
+  subsequent configures/rebuilds don't need network access again.
 
 # Installation
 1. Install system packages
@@ -511,6 +516,23 @@ Omit this section for receptor-only hydration.
 | Key | Req | Type | Constraints | Example |
 |-----|:---:|------|-------------|---------|
 | `gci.peak_percentile` | ✓ | float | 0 < value ≤ 100 | `90.0` |
+| `gci.mu_bulk` |  | float | kcal/mol | `-6.09` |
+| `gci.temperature` |  | float | K | `300.0` |
+| `gci.capacity_filter` |  | bool | default `true` | `true` |
+| `gci.bulk_water_density` |  | float | waters/Å³, default `0.0334` | `0.0334` |
+| `gci.max_capacity_hit_fraction` |  | float | 0–1, default `0.01` | `0.01` |
+| `gci.max_mean_capacity_fraction` |  | float | 0–1, default `0.90` | `0.90` |
+| `gci.local_radius` |  | float | Å, default `1.4` | `1.4` |
+| `gci.local_volume_mode` |  | string | `"sampler"` (default), `"standard"`, or `"sphere"` | `"sampler"` |
+| `gci.region_max_terms` |  | int | default `12` | `12` |
+| `gci.local_max_terms` |  | int | default `4` | `4` |
+| `gci.random_starts` |  | int | default `64` | `64` |
+| `gci.seed` |  | int | fit RNG seed, default `20260812` | `20260812` |
+
+`gci.mu_bulk` is optional: if omitted, it's auto-selected from the
+compiled water model's published literature value (with a loud warning
+-- see `utils.MU_BULK_BY_WATER_MODEL`), since that value was fit with a
+different energy function/cutoff than MCSwell's own sampler.
 
 ---
 
@@ -566,3 +588,29 @@ You can run the example provided in the `example` folder:
 ```console
 (mcswell) foo@bar:~$ python python/run_mcswell.py --config example/config.toml
 ```
+
+## Output
+
+The GCMC titration and both free-energy analyses run entirely in memory:
+no per-snapshot PDB is written to disk. Under `[io].save_path`, a run
+writes only the final result artifacts:
+
+```
+<save_path>/
+  box.pdb, system_cleaned.pdb        # pre-simulation setup, from OpenMM
+  gci/<peak_percentile>_binomial/    # independent-site binomial fit
+    sites.csv, sites.pdb, sites_all.csv, titration.csv,
+    titration_diagnostics.csv, capacity_diagnostics.csv, gO.dx,
+    binomial_metadata.json, titration_curves.png
+  gci/<peak_percentile>_protoms_gci/ # ProtoMS-style GCI
+    sites.csv, sites.pdb, region_titration.csv, local_titration.csv,
+    region_gci_pmf.csv, region_gci_model.csv, local_gci_models.csv,
+    gci_metadata.json, region_titration.png, local_titration_curves.png
+```
+
+If you want per-snapshot PDBs for visual inspection in PyMOL/VMD (e.g.
+while debugging), pass `dump_debug_pdbs=True` to `mc.run_mcswell_and_analyze`
+(or the lower-level `mc.run_mcswell`) if calling the Python module directly;
+they're written under `<save_path>/mu_###/snap_#####.pdb`. This isn't
+exposed as a `run_mcswell.py` CLI flag, since it's meant for one-off
+debugging, not routine runs.

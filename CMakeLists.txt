@@ -156,11 +156,69 @@ set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
+# ---- nanoflann (header-only KD-tree, used by the post-simulation analysis
+#      library below) -----------------------------------------------------
+# Fetched as plain sources via FetchContent_Populate (not
+# FetchContent_MakeAvailable) so that nanoflann's own CMakeLists.txt --
+# which adds its own example/test targets and pollutes directory-scope
+# compile options -- is never processed. We only need the single header.
+include(FetchContent)
+FetchContent_Declare(
+    nanoflann
+    GIT_REPOSITORY https://github.com/jlblancoc/nanoflann.git
+    GIT_TAG        v1.10.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(nanoflann)
+if(NOT nanoflann_POPULATED)
+    FetchContent_Populate(nanoflann)
+endif()
+
+add_library(nanoflann INTERFACE)
+target_include_directories(nanoflann INTERFACE "${nanoflann_SOURCE_DIR}/include")
+
+# ---- Post-simulation analysis library ------------------------------------
+# Pure C++17, no CUDA: operates on host-memory snapshot data already
+# produced by the GPU titration kernel (see run_mcswell_gpu_titration in
+# src/run_mcswell.cpp). Kept as its own target so it can be built and unit
+# tested with a plain C++ compiler, without a CUDA toolchain or GPU.
+add_library(mcswell_analysis STATIC
+    src/analysis/kdtree.cpp
+    src/analysis/frame_extraction.cpp
+    src/analysis/density_grid.cpp
+    src/analysis/binomial_fit.cpp
+    src/analysis/gci_fit.cpp
+    src/analysis/writers.cpp
+    src/analysis/pipeline_analysis.cpp
+)
+
+target_include_directories(mcswell_analysis PUBLIC
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+target_link_libraries(mcswell_analysis PUBLIC nanoflann)
+target_compile_features(mcswell_analysis PUBLIC cxx_std_17)
+
+# Linked into the _mcswell_cpp shared module below, so it must be built as
+# position-independent code even though it's a static library.
+set_target_properties(mcswell_analysis PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if (NOT MSVC)
+  target_compile_options(mcswell_analysis PRIVATE -O3 -Wall -Wextra -Wpedantic)
+endif()
+
+option(MCSWELL_BUILD_TESTS "Build standalone unit tests for the CUDA-free analysis library" OFF)
+if(MCSWELL_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
 # ---- Python extension (note the leading underscore) ----
 pybind11_add_module(_mcswell_cpp
     src/bindings.cpp
     src/insertion_points.cpp
     src/run_mcswell.cpp
+    src/pipeline.cpp
     src/cuda/cuda_kernels.cu
     src/cuda/launch.cu
 )
@@ -177,6 +235,7 @@ target_include_directories(_mcswell_cpp PRIVATE
 target_link_libraries(_mcswell_cpp PRIVATE
     CUDA::cudart
     CUDA::curand
+    mcswell_analysis
 )
 
 if (NOT MSVC)
