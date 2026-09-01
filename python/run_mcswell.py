@@ -39,6 +39,42 @@ from openff.toolkit import Molecule
 from openmmforcefields.generators import EspalomaTemplateGenerator, GAFFTemplateGenerator, SMIRNOFFTemplateGenerator
 from openff.units.openmm import to_openmm
 
+# The OpenMM prep (pdbfixer -> forcefield -> parameter extraction) is a rounding
+# error next to the GCMC titration, so it shares the titration's GPU rather than
+# being pushed onto the CPU: for an 8.3k-atom receptor one force evaluation costs
+# ~1 ms on CUDA against ~7 s on a single CPU thread. "auto" lets OpenMM pick the
+# fastest platform it has (honouring OPENMM_DEFAULT_PLATFORM if that is set).
+DEFAULT_OPENMM_PLATFORM = "auto"
+
+# The receptor is prepped as an isolated (non-periodic) solute, so the nonbonded
+# terms get a plain distance cutoff. Leaving the method at OpenMM's NoCutoff
+# default makes both the NonbondedForce and the GBn2 CustomGBForce O(N^2) over
+# every pair in the protein, which is what used to dominate the run.
+DEFAULT_NONBONDED_CUTOFF = 10 * openmmunit.angstrom
+DEFAULT_SWITCH_DISTANCE = 9 * openmmunit.angstrom
+
+
+def resolve_openmm_platform(platform_name):
+    """Return the openmm.Platform to prep on, or None to let OpenMM choose.
+
+    :param platform_name: platform name, or "auto"/None for OpenMM's own pick
+    :type platform_name: str | None
+    :return: the requested platform, or None
+    :rtype: Platform | None
+    """
+    if platform_name is None or str(platform_name).lower() == "auto":
+        return None
+    try:
+        return Platform.getPlatformByName(str(platform_name))
+    except Exception:
+        available = [Platform.getPlatform(i).getName()
+                     for i in range(Platform.getNumPlatforms())]
+        raise ValueError(
+            f"Unknown OpenMM platform {platform_name!r}. "
+            f"Available here: {', '.join(available)} (or 'auto')."
+        )
+
+
 def _build_box(positions, padding=2*openmmunit.angstrom):
         """Builds the simulation box
         """
@@ -95,8 +131,20 @@ def fix_pdb(pdbfile: str, pdbxfile: str, keep_heterogens: bool=False):
     fixer.addMissingHydrogens(7)
     return fixer.topology, fixer.positions
 
-def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml", 
-        "amber14/tip3p.xml", "implicit/gbn2.xml"]):
+def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml",
+        "amber14/tip3p.xml", "implicit/gbn2.xml"], minimize=False,
+        minimize_max_iterations=500, platform_name=DEFAULT_OPENMM_PLATFORM):
+    """Turns receptor PDBs into the Atom list the sampler scores against.
+
+    :param minimize: run an energy minimization on the prepped structure before
+        reading off the coordinates. Off by default: input structures are
+        assumed to be already equilibrated.
+    :type minimize: bool, optional
+    :param minimize_max_iterations: L-BFGS iteration cap when minimizing
+    :type minimize_max_iterations: int, optional
+    :param platform_name: OpenMM platform for the minimization, or "auto"
+    :type platform_name: str, optional
+    """
     waters_residue_names = ["HOH", "WAT"]
     mcswell_atoms = list()
 
@@ -126,38 +174,46 @@ def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml"
         
         vectors = _build_box(protein_positions)
         protein_modeller.topology.setPeriodicBoxVectors(vectors)
-        protein_atoms = [atom for atom in protein_topology.atoms() if atom.residue.name not in ["NA", "CL", "K"]]
         forcefield = ForceField(*protein_ff)
         system = forcefield.createSystem(protein_modeller.topology,
-                                        # nonbondedMethod=PME,
-                                        # nonbondedCutoff=10*openmmunit.angstrom,
-                                        switchDistance=9*openmmunit.angstrom,
+                                        nonbondedMethod=CutoffNonPeriodic,
+                                        nonbondedCutoff=DEFAULT_NONBONDED_CUTOFF,
+                                        switchDistance=DEFAULT_SWITCH_DISTANCE,
                                         removeCMMotion=True,
                                         # constraints=HBonds,
                                         hydrogenMass=1.0*openmmunit.amu,
                                         soluteDielectric=1.0,
                                         solventDielectric=78.5)
-        
-        print("Minimizing hydrogen geometry...")
-        _integrator = openmm.LangevinMiddleIntegrator(
-            300 * unit.kelvin, 1 / unit.picosecond, 0.004 * unit.picoseconds
-        )
-        _simulation = Simulation(protein_modeller.topology, system, _integrator)
-        _simulation.context.setPositions(protein_modeller.positions)
-        _simulation.minimizeEnergy(maxIterations=500)
-        positions = _simulation.context.getState(getPositions=True).getPositions()
-        protein_modeller.positions = positions
-        print("[Minimization done")
+
+        if minimize:
+            print(f"Minimizing geometry (max {minimize_max_iterations} iterations)...")
+            _integrator = openmm.LangevinMiddleIntegrator(
+                300 * unit.kelvin, 1 / unit.picosecond, 0.004 * unit.picoseconds
+            )
+            _simulation = Simulation(protein_modeller.topology, system, _integrator,
+                                     resolve_openmm_platform(platform_name))
+            print(f"  OpenMM platform: {_simulation.context.getPlatform().getName()}")
+            _simulation.context.setPositions(protein_modeller.positions)
+            _simulation.minimizeEnergy(maxIterations=minimize_max_iterations)
+            protein_modeller.positions = _simulation.context.getState(
+                getPositions=True).getPositions()
+            print("Minimization done")
+        else:
+            print("Skipping minimization (input structure assumed equilibrated) -- "
+                  "enable with --minimize or [openmm] minimize = true")
 
         # Save the cleaned receptor
-        rec_name = pdb_file.split("/")[-1].split(".")[0]
         PDBFile.writeFile(protein_modeller.topology, protein_modeller.positions, open(f'{project_path}/system_cleaned.pdb', 'w'))
 
         # Retrieve all Force objects from the System
         forces = system.getForces()
         # Find the NonbondedForce object
         nonbonded_force = [f for f in forces if isinstance(f, NonbondedForce)][0]
-        for idx, atom in enumerate(protein_atoms):
+        # Topology, positions and System all come from protein_modeller, so
+        # atom.index addresses the same particle in each of them -- including
+        # after minimization, and after any residue the Modeller dropped.
+        positions = protein_modeller.positions
+        for atom in protein_modeller.topology.atoms():
             charge, sigma, epsilon = nonbonded_force.getParticleParameters(atom.index)
             residue = atom.residue
             
@@ -173,7 +229,7 @@ def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml"
             unique_id = f"{chain_id}:{residue.name}:{residue.index}"
             # print(unique_id)
             atom_id = f"{unique_id}:{atom_type}"
-            coords = protein_positions[idx].in_units_of(openmmunit.angstrom)._value
+            coords = positions[atom.index].in_units_of(openmmunit.angstrom)._value
             if atom_type == "HW":
                 rmin_half_value = 0.0
                 epsilon_value = 0.0
@@ -267,7 +323,9 @@ def characterize_small_molecule(small_molecules, small_molecule_forcefield, prot
         mcswell_atoms.append(new_atom)
     return mcswell_atoms
 
-def get_data_from_openmm(receptors, project_path, small_molecules=None, small_molecule_forcefield=None):
+def get_data_from_openmm(receptors, project_path, small_molecules=None, small_molecule_forcefield=None,
+                         minimize=False, minimize_max_iterations=500,
+                         platform_name=DEFAULT_OPENMM_PLATFORM):
     mcswell_atoms = list()
     if small_molecules is not None:
         print("Parametrizing small molecule..")
@@ -276,13 +334,16 @@ def get_data_from_openmm(receptors, project_path, small_molecules=None, small_mo
             mcswell_atoms.append(atom)
     if receptors is not None:
         print("Parametrizing receptor..")
-        atoms_receptor = characterize_receptor(receptors, project_path)
+        atoms_receptor = characterize_receptor(receptors, project_path, minimize=minimize,
+                                               minimize_max_iterations=minimize_max_iterations,
+                                               platform_name=platform_name)
         for atom in atoms_receptor:
             mcswell_atoms.append(atom)
     return mcswell_atoms
 
 
-def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_method="both"):
+def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_method="both",
+                minimize=None, openmm_platform=None):
     #io
     # project_path = config["io"]["save_path"]
     os.makedirs(project_path, exist_ok=True)
@@ -300,12 +361,24 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         small_molecule_path = config["ligand"]["small_molecule_path"]
         small_molecule_ff = config["ligand"]["small_molecule_forcefield"]
 
+    #openmm (prep only -- the GCMC titration is a separate CUDA kernel)
+    openmm_cfg = config.get("openmm", {})
+    if minimize is None:
+        minimize = bool(openmm_cfg.get("minimize", False))
+    if openmm_platform is None:
+        openmm_platform = str(openmm_cfg.get("platform", DEFAULT_OPENMM_PLATFORM))
+    minimize_max_iterations = int(openmm_cfg.get("minimize_max_iterations", 500))
+
     #simulation_parameters
     n_snapshots = config["simulation_parameters"]["n_snapshots"]
     if n_gcmc_steps is None:
         n_gcmc_steps = config["simulation_parameters"]["n_gcmc_steps"]
     n_equilibration_steps = config["simulation_parameters"]["n_equilibration_steps"]
     distance_cutoff = config["simulation_parameters"]["distance_cutoff"]
+    # Master RNG seed for the GCMC titration. This has to come from the config:
+    # left at the binding's default, replicates of the same system share a seed
+    # and reproduce each other bit for bit.
+    seed = int(config["simulation_parameters"].get("seed", 12345))
 
     #mu_range
     mu_values = expand_ranges(config["mu_range"])
@@ -322,12 +395,15 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     save_box_corners_pdb([center_x, center_y, center_z], [x_size, y_size, z_size], outfile=f"{project_path}/box.pdb")
     
     print("Parametrizing system with OpenMM...")
-    parametrized_atoms = get_data_from_openmm(receptors=receptor_path, 
-        project_path=project_path, 
-        small_molecules=small_molecule_path, 
-        small_molecule_forcefield=small_molecule_ff,)
+    parametrized_atoms = get_data_from_openmm(receptors=receptor_path,
+        project_path=project_path,
+        small_molecules=small_molecule_path,
+        small_molecule_forcefield=small_molecule_ff,
+        minimize=minimize,
+        minimize_max_iterations=minimize_max_iterations,
+        platform_name=openmm_platform,)
 
-    print("Starting MCSwell!")
+    print(f"Starting MCSwell! (GCMC seed: {seed})")
     center = [center_x, center_y, center_z]
     pts = mc.make_insertion_points(
          parametrized_atoms,
@@ -382,6 +458,7 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         local_max_terms=int(gci_pick("local_max_terms", 4)),
         random_starts=int(gci_pick("random_starts", 64)),
         fit_seed=int(gci_pick("seed", 20260812)),
+        seed=seed,
     )
 
     exec_time = time.time() - start
@@ -414,6 +491,35 @@ def build_parser():
             "binomial MLE occupancy fit), or 'both' (default: runs both)."
         ),
     )
+    parser.add_argument(
+        "--minimize",
+        dest="minimize",
+        action="store_true",
+        default=None,
+        help=(
+            "Energy-minimize the prepped receptor before reading off the "
+            "coordinates the sampler scores against. Off by default: input "
+            "structures are assumed to be already equilibrated. Overrides "
+            "[openmm] minimize in the config."
+        ),
+    )
+    parser.add_argument(
+        "--no-minimize",
+        dest="minimize",
+        action="store_false",
+        help="Skip the minimization even if [openmm] minimize = true.",
+    )
+    parser.add_argument(
+        "--openmm-platform",
+        dest="openmm_platform",
+        default=None,
+        help=(
+            "OpenMM platform for the prep/minimization step (CUDA, OpenCL, CPU, "
+            "Reference, or 'auto'). The GCMC titration always runs on the GPU "
+            "regardless. Overrides [openmm] platform in the config "
+            f"(default: {DEFAULT_OPENMM_PLATFORM})."
+        ),
+    )
     return parser
 
 
@@ -425,7 +531,8 @@ if __name__ == "__main__":
     project_path_base = config["io"]["save_path"]
     print("Starting")
     run_info = run_mcswell(
-        config, project_path_base, energy_estimation_method=args.energy_estimation_method
+        config, project_path_base, energy_estimation_method=args.energy_estimation_method,
+        minimize=args.minimize, openmm_platform=args.openmm_platform
     )
 
     # The titration + free-energy fits already ran (in C++, in memory) as
