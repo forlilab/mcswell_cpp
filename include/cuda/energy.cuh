@@ -429,6 +429,12 @@ float eval_energy_with_receptor(
     }
 
     // block reduction
+    //
+    // The leading barrier guards the sh_partials buffer across *consecutive*
+    // calls: without it a fast thread can overwrite sh_partials[0] here while a
+    // slow thread is still reading the previous call's result off it, which is
+    // exactly what the receptor-then-waters call pairs do.
+    __syncthreads();
     sh_partials[tid] = partial;
     __syncthreads();
 
@@ -441,11 +447,11 @@ float eval_energy_with_receptor(
 
 __device__ __forceinline__
 float eval_energy_with_waters(
-    const float* __restrict__ waters_compact,  // [n_mu * target_n_waters * 12] (water-major)
+    const float* __restrict__ waters_compact,  // [n_mu * water_capacity * 12] (water-major)
     const float* __restrict__ target_water,    // [12] compact
     uint32_t sim_id,
     uint32_t active_waters,
-    uint32_t target_n_waters,
+    uint32_t water_capacity,                   // per-mu stride of waters_compact, in waters
     int skip_w_idx,
     float* __restrict__ sh_partials            // [blockDim.x]
 ){
@@ -476,14 +482,15 @@ float eval_energy_with_waters(
 
     float partial = 0.0f;
 
-    // base in floats for this sim
-    const uint32_t sim_base = sim_id * target_n_waters * (uint32_t)WATER_SIZE;
+    // base in floats for this sim (64-bit: the buffer grows on demand, so
+    // n_mu * water_capacity * WATER_SIZE is not bounded by 2^32)
+    const size_t sim_base = (size_t)sim_id * water_capacity * (size_t)WATER_SIZE;
 
     for (uint32_t w_idx = (uint32_t)tid; w_idx < active_waters; w_idx += (uint32_t)stride) {
 
         if (skip_w_idx >= 0 && (int)w_idx == skip_w_idx) continue;
 
-        const uint32_t wb = sim_base + w_idx * (uint32_t)WATER_SIZE;
+        const size_t wb = sim_base + (size_t)w_idx * (size_t)WATER_SIZE;
 
         // Load other water O/H/H
         const float wOx  = waters_compact[wb + 0];
@@ -582,6 +589,9 @@ float eval_energy_with_waters(
 #endif
     }
 
+    // See the matching comment in eval_energy_with_receptor: the leading
+    // barrier is what makes back-to-back calls sharing sh_partials safe.
+    __syncthreads();
     sh_partials[tid] = partial;
     __syncthreads();
 

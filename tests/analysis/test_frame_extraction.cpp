@@ -19,6 +19,8 @@
 #include "cuda/consts.cuh"
 #include "harness.hpp"
 
+#include <array>
+#include <cmath>
 #include <stdexcept>
 
 using mcswell::analysis::CapacityScanResult;
@@ -29,45 +31,40 @@ using mcswell::analysis::WaterFrame;
 
 namespace {
 
-std::size_t snapshot_base(std::size_t mu, std::size_t snap, std::size_t n_snapshots, std::size_t max_n_waters) {
+// Builds a WaterSnapshots from per-frame oxygen lists, in frame order
+// (mu-major, then snapshot). Hydrogens are left at zero; only the oxygens
+// matter to the extraction.
+mcswell::WaterSnapshots make_snapshots(
+    std::size_t n_mu, std::size_t n_snapshots,
+    const std::vector<std::vector<std::array<float, 3>>>& frames) {
     const auto ws = static_cast<std::size_t>(WATER_SIZE);
-    return mu * n_snapshots * max_n_waters * ws + snap * max_n_waters * ws;
-}
-
-void set_water_oxygen(
-    std::vector<float>& buf, std::size_t base, std::size_t water_idx,
-    float x, float y, float z) {
-    const auto ws = static_cast<std::size_t>(WATER_SIZE);
-    const std::size_t idx = base + water_idx * ws;
-    buf[idx + OX] = x;
-    buf[idx + OY] = y;
-    buf[idx + OZ] = z;
+    mcswell::WaterSnapshots s;
+    s.n_mu = n_mu;
+    s.n_snapshots = n_snapshots;
+    s.offsets.push_back(0);
+    for (const auto& frame : frames) {
+        for (const auto& o : frame) {
+            const std::size_t base = s.waters.size();
+            s.waters.resize(base + ws, 0.0f);
+            s.waters[base + OX] = o[0];
+            s.waters[base + OY] = o[1];
+            s.waters[base + OZ] = o[2];
+        }
+        s.offsets.push_back(s.offsets.back() + frame.size());
+    }
+    return s;
 }
 
 void test_extract_oxygen_frames() {
-    const std::size_t n_mu = 2, n_snapshots = 2, max_n_waters = 3;
-    const auto ws = static_cast<std::size_t>(WATER_SIZE);
-    std::vector<float> buf(n_mu * n_snapshots * max_n_waters * ws, 0.0f);
+    const std::size_t n_mu = 2, n_snapshots = 2;
+    const auto snaps = make_snapshots(n_mu, n_snapshots, {
+        {{1.0f, 2.0f, 3.0f}, {4.0f, 5.0f, 6.0f}},    // mu=0, snap=0
+        {},                                          // mu=0, snap=1: no waters
+        {{7.0f, 8.0f, 9.0f}, {10.0f, 11.0f, 12.0f}}, // mu=1, snap=0
+        {{0.5f, 0.5f, 0.5f}},                        // mu=1, snap=1
+    });
 
-    // mu=0, snap=0: waters 0 and 2 active, water 1 left as an inactive
-    // (all-zero) slot.
-    auto b00 = snapshot_base(0, 0, n_snapshots, max_n_waters);
-    set_water_oxygen(buf, b00, 0, 1.0f, 2.0f, 3.0f);
-    set_water_oxygen(buf, b00, 2, 4.0f, 5.0f, 6.0f);
-
-    // mu=0, snap=1: every water inactive.
-
-    // mu=1, snap=0: waters 0 and 1 active.
-    auto b10 = snapshot_base(1, 0, n_snapshots, max_n_waters);
-    set_water_oxygen(buf, b10, 0, 7.0f, 8.0f, 9.0f);
-    set_water_oxygen(buf, b10, 1, 10.0f, 11.0f, 12.0f);
-
-    // mu=1, snap=1: only water 1 active, at a coordinate close to (but not
-    // exactly) the origin -- must NOT be treated as inactive.
-    auto b11 = snapshot_base(1, 1, n_snapshots, max_n_waters);
-    set_water_oxygen(buf, b11, 1, 0.5f, 0.5f, 0.5f);
-
-    auto frames = extract_oxygen_frames(buf, n_mu, n_snapshots, max_n_waters);
+    auto frames = extract_oxygen_frames(snaps);
 
     MCSWELL_CHECK(frames.size() == n_mu);
     MCSWELL_CHECK(frames[0].frames.size() == n_snapshots);
@@ -87,6 +84,28 @@ void test_extract_oxygen_frames() {
     const auto& mu1_snap1 = frames[1].frames[1].oxygens;
     MCSWELL_CHECK(mu1_snap1.size() == 1);
     MCSWELL_CHECK_NEAR(mu1_snap1[0][0], 0.5, 1e-6);
+}
+
+void test_extract_keeps_water_at_origin() {
+    // The old padded buffer used an all-zero oxygen to mark an empty slot,
+    // so a real water at exactly the origin was silently dropped. Frame
+    // sizes now come from the offsets alone.
+    const auto snaps = make_snapshots(1, 1, {{{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}}});
+    auto frames = extract_oxygen_frames(snaps);
+    MCSWELL_CHECK(frames[0].frames[0].oxygens.size() == 2);
+    MCSWELL_CHECK_NEAR(frames[0].frames[0].oxygens[0][0], 0.0, 1e-12);
+}
+
+void test_extract_rejects_malformed_snapshots() {
+    auto snaps = make_snapshots(1, 2, {{{1.0f, 2.0f, 3.0f}}, {}});
+    snaps.waters.pop_back();  // one float short of offsets.back() * WATER_SIZE
+    bool threw = false;
+    try {
+        extract_oxygen_frames(snaps);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    MCSWELL_CHECK(threw);
 }
 
 MuWindowFrames make_window(std::vector<std::size_t> counts_per_frame) {
@@ -153,20 +172,33 @@ void test_capacity_scan_filter_disabled() {
     }
 }
 
+void test_capacity_scan_no_limit() {
+    // water_capacity == 0: the sampler had no hard limit, so even a window
+    // full of waters cannot have been truncated and stays valid.
+    std::vector<MuWindowFrames> frames_by_mu = {make_window({1}), make_window({50, 60}), make_window({1})};
+    std::vector<double> mu_values = {-10.0, -5.0, 0.0};
+
+    auto result = scan_capacity_and_collect_density_points(
+        frames_by_mu, mu_values, /*water_capacity=*/0,
+        /*capacity_filter=*/true,
+        /*max_capacity_hit_fraction=*/0.01,
+        /*max_mean_capacity_fraction=*/0.90);
+
+    MCSWELL_CHECK(result.valid_mask[0] && result.valid_mask[1] && result.valid_mask[2]);
+    MCSWELL_CHECK(result.density_points.size() == 1 + 50 + 60 + 1);
+    for (const auto& d : result.diagnostics) {
+        MCSWELL_CHECK(d.capacity_filter_reason == "no_capacity_limit");
+        MCSWELL_CHECK(d.water_capacity == 0);
+        MCSWELL_CHECK(std::isnan(d.capacity_mean_fraction));
+        MCSWELL_CHECK(std::isnan(d.capacity_hit_fraction));
+    }
+    MCSWELL_CHECK(result.diagnostics[1].n_region_max_observed == 60);
+}
+
 void test_capacity_scan_validation_errors() {
     std::vector<MuWindowFrames> frames_by_mu = {make_window({1})};
-    std::vector<double> mu_values = {-10.0};
-
-    bool threw = false;
-    try {
-        scan_capacity_and_collect_density_points(frames_by_mu, mu_values, 0, true, 0.01, 0.9);
-    } catch (const std::invalid_argument&) {
-        threw = true;
-    }
-    MCSWELL_CHECK(threw);
-
-    threw = false;
     std::vector<double> mismatched = {-10.0, -5.0};
+    bool threw = false;
     try {
         scan_capacity_and_collect_density_points(frames_by_mu, mismatched, 5, true, 0.01, 0.9);
     } catch (const std::invalid_argument&) {
@@ -179,7 +211,10 @@ void test_capacity_scan_validation_errors() {
 
 void run_frame_extraction_tests() {
     test_extract_oxygen_frames();
+    test_extract_keeps_water_at_origin();
+    test_extract_rejects_malformed_snapshots();
     test_capacity_scan_contiguous_prefix();
     test_capacity_scan_filter_disabled();
+    test_capacity_scan_no_limit();
     test_capacity_scan_validation_errors();
 }

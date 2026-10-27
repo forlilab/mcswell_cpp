@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <cstddef>
 
+#include "cuda/titration_state.cuh"
+
 std::size_t dummy_rng_state_bytes();
 
 void init_rng_launch(void* d_states, std::uint64_t seed, int n_mu);
@@ -35,20 +37,46 @@ void run_gcmc_titration_launch(
     const float* d_receptor,         // (ATOM_FEATURES*n_receptor_atoms)
     int n_receptor_atoms,
 
-    float* d_waters,                 // (n_mu*target_n_waters*WATER_SIZE)
+    float* d_waters,                 // (n_mu*water_capacity*WATER_SIZE)
     std::uint32_t* d_wat_num,         // (n_mu)
 
-    const float* d_scalars,           // (5) [last_residue, volume, num_steps, target_n_waters, n_moves]
-    float* d_snapshots,               // output
+    const float* d_scalars,           // (4) [last_residue, volume, num_steps, initial capacity]
 
     const float* d_mu_values,         // (n_mu)
     int n_mu,
 
     float distance_cutoff,
     std::uint32_t gcmc_steps,
+    std::uint32_t step_end,          // run no further than this step in this launch
     std::uint32_t equil_steps,
     std::uint32_t n_snapshots,
-    std::uint32_t target_n_waters,
+    std::uint32_t water_capacity,     // per-mu stride of d_waters, in waters
+    bool grow_on_full,                // stop at water_capacity (to grow) instead of refusing insertions
+    float max_rotation_rad,           // displacement rotation angle drawn from +-this
 
-    void* d_states                   // opaque RNG states (n_mu * dummy_rng_state_bytes())
+    void* d_states,                  // opaque RNG states (n_mu * dummy_rng_state_bytes())
+
+    // Resume state and snapshot staging; see include/cuda/titration_state.cuh.
+    TitrationCarry carry,
+    SnapshotArena arena,
+
+    // Per-(mu, window) sampling diagnostics; see
+    // include/analysis/sampler_diagnostics.hpp. Pass n_diag_windows == 0 to
+    // disable. Instrumentation draws no random numbers, so it does not perturb
+    // the chain.
+    unsigned long long* d_diag_proposed,         // [n_mu * n_diag_windows * 3]
+    unsigned long long* d_diag_accepted,         // [n_mu * n_diag_windows * 3]
+    unsigned long long* d_diag_capacity_blocked, // [n_mu * n_diag_windows]
+    unsigned long long* d_diag_n_sum,            // [n_mu * n_diag_windows]
+    std::uint32_t* d_diag_n_end,                 // [n_mu * n_diag_windows]
+    float* d_diag_energy_end,                    // [n_mu * n_diag_windows]
+    std::uint32_t n_diag_windows,
+    std::uint32_t steps_per_diag_window,
+    std::uint32_t diag_energy_stride,
+
+    // Cavity mask constraining displacement; null disables the constraint.
+    const unsigned char* d_cavity_mask,
+    int mask_nx, int mask_ny, int mask_nz,
+    float mask_ox, float mask_oy, float mask_oz,
+    float mask_spacing
 );

@@ -19,7 +19,10 @@
 
 import mcswell_cpp as mc
 import argparse
+import hashlib
 import io
+import json
+import tempfile
 import numpy as np
 import itertools
 import time
@@ -28,7 +31,8 @@ from utils import *
 import tomllib
 import estimate_free_energies as fe
 import estimate_free_energies_GCI as fe_gci
-from rdkit import Chem 
+import plot_acceptance
+from rdkit import Chem
 from rdkit.Chem import SDMolSupplier
 from openmm.app import *
 from openmm import *
@@ -342,11 +346,80 @@ def get_data_from_openmm(receptors, project_path, small_molecules=None, small_mo
     return mcswell_atoms
 
 
+# Version of the prepared-system files written by --prepare-only.
+PREPARED_SYSTEM_FORMAT = 1
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fi:
+        for block in iter(lambda: fi.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def prepared_system_inputs(receptors, small_molecules, small_molecule_forcefield, minimize):
+    """Everything the OpenMM prep depends on, to check a prepared system against a config.
+
+    Files are identified by content, not path, so a system prepared on one
+    machine can be used on another where the inputs live somewhere else.
+    """
+    return {
+        "receptor_sha256": [_sha256(p) for p in receptors or []],
+        "ligand_sha256": [_sha256(p) for p in small_molecules or []],
+        "ligand_forcefield": small_molecule_forcefield,
+        "minimize": bool(minimize),
+    }
+
+
+def save_prepared_system(path, atoms, cleaned_pdb, inputs, sources):
+    """Write the parametrized atoms (and the cleaned receptor PDB) to a JSON file."""
+    data = {
+        "format": PREPARED_SYSTEM_FORMAT,
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "openmm_version": Platform.getOpenMMVersion(),
+        "inputs": inputs,
+        "sources": sources,
+        "cleaned_pdb": cleaned_pdb,
+        "atoms": [[a.atom_type, a.atom_id, list(a.coords), a.rmin_half, a.epsilon, a.charge]
+                  for a in atoms],
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as fo:
+        json.dump(data, fo)
+    os.replace(tmp, path)
+
+
+def load_prepared_system(path, inputs):
+    """Read a prepared system, refusing one made from different inputs or prep options."""
+    with open(path) as fi:
+        data = json.load(fi)
+    if data.get("format") != PREPARED_SYSTEM_FORMAT:
+        raise ValueError(f"{path}: prepared-system format {data.get('format')!r}, "
+                         f"this driver reads format {PREPARED_SYSTEM_FORMAT}. Prepare it again.")
+    mismatched = [k for k in inputs if data["inputs"].get(k) != inputs[k]]
+    if mismatched:
+        raise ValueError(f"{path} was prepared from different inputs than this config "
+                         f"({', '.join(mismatched)} differ). Prepare it again with --prepare-only.")
+    atoms = [mc.Atom(t, i, c, r, e, q) for t, i, c, r, e, q in data["atoms"]]
+    return atoms, data["cleaned_pdb"]
+
+
 def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_method="both",
-                minimize=None, openmm_platform=None):
+                minimize=None, openmm_platform=None, prepare_only=False):
     #io
     # project_path = config["io"]["save_path"]
-    os.makedirs(project_path, exist_ok=True)
+    # Parametrized receptor + ligand, prepared once (--prepare-only) and shared
+    # by every run of the same system (replicates, water models). Ligand charges
+    # alone take minutes, and sharing the file guarantees that every run scores
+    # against exactly the same atoms.
+    prepared_system = config["io"].get("prepared_system")
+    if prepare_only and not prepared_system:
+        raise ValueError("--prepare-only needs io.prepared_system in the config: "
+                         "the path to write the prepared system to")
+    if not prepare_only:
+        os.makedirs(project_path, exist_ok=True)
 
     #receptor
     receptor_path = None
@@ -379,6 +452,34 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     # left at the binding's default, replicates of the same system share a seed
     # and reproduce each other bit for bit.
     seed = int(config["simulation_parameters"].get("seed", 12345))
+    # Sampling diagnostics: per-(mu, window) acceptance counts plus occupancy
+    # and energy traces, written to acceptance_windows.csv /
+    # acceptance_summary.csv. Collecting them draws no random numbers, so the
+    # chain is unchanged; 0 switches them off.
+    n_diagnostic_windows = int(
+        config["simulation_parameters"].get("n_diagnostic_windows", 1000))
+    diagnostic_energy_stride = int(
+        config["simulation_parameters"].get("diagnostic_energy_stride", 1))
+    # Hard limit on the waters per mu window. 0 (the default) means none: the
+    # water buffer grows on demand, so high-mu windows are no longer truncated.
+    max_waters = int(config["simulation_parameters"].get("max_waters", 0))
+    # Largest rotation of a displacement move, in degrees (0, 180]. Full
+    # random reorientations are almost always rejected in dense water.
+    max_rotation_deg = float(config["simulation_parameters"].get("max_rotation_deg", 30.0))
+    # Reject displacement moves that would carry a water out of the sampled
+    # region. Without it waters drift out of the region and the box, where
+    # insertion cannot reach them: detailed balance breaks and N is inflated.
+    # false only to reproduce runs made before this became the default.
+    constrain_displacement = bool(config["simulation_parameters"].get("constrain_displacement", True))
+    # Starting state of each mu window: "auto" pre-fills the windows above
+    # bulk mu (an empty start there spends the run filling one insertion at a
+    # time) and starts the rest empty; "empty" / "full" apply one start to
+    # every window. Running "empty" and "full" and comparing is a direct
+    # equilibration check.
+    initial_fill = str(config["simulation_parameters"].get("initial_fill", "auto")).lower()
+    if initial_fill not in ("auto", "empty", "full"):
+        raise ValueError(f"simulation_parameters.initial_fill must be 'auto', 'empty' or 'full', "
+                         f"not {initial_fill!r}")
 
     #mu_range
     mu_values = expand_ranges(config["mu_range"])
@@ -392,26 +493,51 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     y_size = config["simulation_box"]["y_size"]
     z_size = config["simulation_box"]["z_size"]
 
+    prep_inputs = prepared_system_inputs(receptor_path, small_molecule_path, small_molecule_ff, minimize)
+    if prepared_system and not prepare_only:
+        if not os.path.exists(prepared_system):
+            raise FileNotFoundError(
+                f"io.prepared_system = {prepared_system} does not exist. Create it first with "
+                f"run_mcswell.py --config <this config> --prepare-only")
+        print(f"Using the prepared system {prepared_system} (no OpenMM prep)")
+        parametrized_atoms, cleaned_pdb = load_prepared_system(prepared_system, prep_inputs)
+        if cleaned_pdb is not None:
+            with open(f"{project_path}/system_cleaned.pdb", "w") as fo:
+                fo.write(cleaned_pdb)
+    else:
+        print("Parametrizing system with OpenMM...")
+        # With --prepare-only nothing goes to save_path: the cleaned PDB is
+        # written to a scratch folder and stored in the prepared system.
+        with tempfile.TemporaryDirectory() as scratch:
+            prep_dir = scratch if prepare_only else project_path
+            parametrized_atoms = get_data_from_openmm(receptors=receptor_path,
+                project_path=prep_dir,
+                small_molecules=small_molecule_path,
+                small_molecule_forcefield=small_molecule_ff,
+                minimize=minimize,
+                minimize_max_iterations=minimize_max_iterations,
+                platform_name=openmm_platform,)
+            cleaned = os.path.join(prep_dir, "system_cleaned.pdb")
+            cleaned_pdb = open(cleaned).read() if os.path.exists(cleaned) else None
+        if prepare_only:
+            save_prepared_system(prepared_system, parametrized_atoms, cleaned_pdb, prep_inputs,
+                                 {"receptor": receptor_path, "ligand": small_molecule_path})
+            print(f"Wrote the prepared system ({len(parametrized_atoms)} atoms) to {prepared_system}")
+            return None
+
     save_box_corners_pdb([center_x, center_y, center_z], [x_size, y_size, z_size], outfile=f"{project_path}/box.pdb")
-    
-    print("Parametrizing system with OpenMM...")
-    parametrized_atoms = get_data_from_openmm(receptors=receptor_path,
-        project_path=project_path,
-        small_molecules=small_molecule_path,
-        small_molecule_forcefield=small_molecule_ff,
-        minimize=minimize,
-        minimize_max_iterations=minimize_max_iterations,
-        platform_name=openmm_platform,)
 
     print(f"Starting MCSwell! (GCMC seed: {seed})")
     center = [center_x, center_y, center_z]
+    # Shared with the displacement constraint, which rebuilds this lattice.
+    min_distance = 1.5
     pts = mc.make_insertion_points(
          parametrized_atoms,
          size=(x_size, y_size, z_size),
          spacing=spacing,
          center=center,
          max_distance=distance_cutoff,
-         min_distance=1.5,
+         min_distance=min_distance,
      )
 
     #gci
@@ -420,10 +546,16 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     def gci_pick(key, default):
         return gci_cfg.get(key, default)
 
+    if "bulk_water_density" in gci_cfg:
+        print("[gci] bulk_water_density is no longer used and is ignored: the "
+              "water capacity is not derived from it anymore (see "
+              "simulation_parameters.max_waters)")
+
     mu_bulk_override = gci_pick("mu_bulk", None)
     mu_bulk, mu_bulk_water_model, mu_bulk_source = resolve_mu_bulk(
         None if mu_bulk_override is None else float(mu_bulk_override)
     )
+    prefill_above_mu = {"auto": mu_bulk, "empty": float("inf"), "full": float("-inf")}[initial_fill]
 
     start = time.time()
     print("Performing TITRATION and GRAND CANONICAL INTEGRATION")
@@ -449,7 +581,6 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         run_gci=energy_estimation_method in ("gci", "both"),
         peak_percentile=float(gci_pick("peak_percentile", 90.0)),
         capacity_filter=bool(gci_pick("capacity_filter", True)),
-        bulk_water_density=float(gci_pick("bulk_water_density", 0.0334)),
         max_capacity_hit_fraction=float(gci_pick("max_capacity_hit_fraction", 0.01)),
         max_mean_capacity_fraction=float(gci_pick("max_mean_capacity_fraction", 0.90)),
         local_radius=float(gci_pick("local_radius", 1.4)),
@@ -459,6 +590,13 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         random_starts=int(gci_pick("random_starts", 64)),
         fit_seed=int(gci_pick("seed", 20260812)),
         seed=seed,
+        n_diagnostic_windows=n_diagnostic_windows,
+        diagnostic_energy_stride=diagnostic_energy_stride,
+        max_waters=max_waters,
+        max_rotation_deg=max_rotation_deg,
+        prefill_above_mu=prefill_above_mu,
+        constrain_displacement=constrain_displacement,
+        min_distance=min_distance,
     )
 
     exec_time = time.time() - start
@@ -510,6 +648,15 @@ def build_parser():
         help="Skip the minimization even if [openmm] minimize = true.",
     )
     parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help=(
+            "Only parametrize the receptor and ligand with OpenMM and write them "
+            "to io.prepared_system, then stop. Runs whose config sets the same "
+            "io.prepared_system then reuse it instead of preparing the system again."
+        ),
+    )
+    parser.add_argument(
         "--openmm-platform",
         dest="openmm_platform",
         default=None,
@@ -532,8 +679,11 @@ if __name__ == "__main__":
     print("Starting")
     run_info = run_mcswell(
         config, project_path_base, energy_estimation_method=args.energy_estimation_method,
-        minimize=args.minimize, openmm_platform=args.openmm_platform
+        minimize=args.minimize, openmm_platform=args.openmm_platform,
+        prepare_only=args.prepare_only,
     )
+    if args.prepare_only:
+        raise SystemExit(0)
 
     # The titration + free-energy fits already ran (in C++, in memory) as
     # part of run_mcswell() above; this just draws the diagnostic plots
@@ -542,3 +692,6 @@ if __name__ == "__main__":
         fe.main(run_info["binomial_output_dir"], mu_bulk=run_info["mu_bulk"])
     if run_info["gci_output_dir"]:
         fe_gci.main(run_info["gci_output_dir"])
+    if run_info["acceptance_summary_csv"]:
+        plot_acceptance.main(os.path.dirname(run_info["acceptance_summary_csv"]),
+                             mu_bulk=run_info["mu_bulk"])
