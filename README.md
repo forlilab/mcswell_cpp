@@ -265,6 +265,14 @@ Omit this section for receptor-only hydration.
 | `simulation_parameters.n_diagnostic_windows` |  | int | ≥ 0, default `1000`; `0` disables | `1000` |
 | `simulation_parameters.diagnostic_energy_stride` |  | int | ≥ 1, default `1` | `20` |
 | `simulation_parameters.max_waters` |  | int | ≥ 0, default `0` (no limit) | `0` |
+| `simulation_parameters.constrain_displacement` |  | bool | default `true` | `true` |
+
+`constrain_displacement` rejects displacement moves that would carry a water
+out of the sampled region (the insertion lattice's voxels). Without it waters
+drift out of the region and out of the box, where insertion can no longer
+reach them: detailed balance breaks and the titration's N is inflated (in the
+example, 17-38% of the waters ended up outside the box). Set it to `false`
+only to reproduce runs made before it became the default.
 
 There is no limit on the number of waters per µ window. The water buffer
 starts at the bulk-water estimate (insertion volume × 0.0334 Å⁻³) and doubles

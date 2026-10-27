@@ -99,8 +99,9 @@ TitrationResult run_mcswell_gpu_titration(
     // Occupancy mask over the insertion lattice. When supplied and
     // `constrain_displacement` is set, a displacement that would move a water
     // out of the sampled region is rejected, so insertion and deletion act on
-    // the same region. Pass nullptr (or leave the flag off) for the historical
-    // unconstrained behaviour.
+    // the same region. The Python bindings and CLI do this by default; leaving
+    // it off lets waters drift out of the region (and the box), which breaks
+    // detailed balance and inflates N, so it exists only to reproduce old runs.
     const InsertionGrid* cavity_grid = nullptr,
     bool constrain_displacement = false,
     std::size_t max_waters = 0,

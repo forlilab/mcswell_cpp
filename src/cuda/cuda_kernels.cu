@@ -32,6 +32,17 @@
 
 static constexpr int BLOCK_THREADS = 512;
 
+// min(1, pref * exp(-beta * delta_e)), with a non-finite result rejecting.
+// Insertion puts the oxygen exactly on a lattice point, so it can land on a
+// water still sitting there: the oxygen-oxygen distance is then 0, the LJ
+// terms overflow to inf - inf, and delta_e is NaN. fminf returns its non-NaN
+// argument, so a bare fminf(NaN, 1) would accept that overlap with
+// probability 1. `p >= 0` is false for NaN.
+__device__ __forceinline__ float metropolis_probability(float pref, float delta_e) {
+    const float p = pref * expf(-(float)BETA * delta_e);
+    return (p >= 0.0f) ? fminf(p, 1.0f) : 0.0f;
+}
+
 
 __global__ void init_rng(curandStatePhilox4_32_10_t* states, std::uint64_t seed, int n_mu) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -235,7 +246,9 @@ __global__ void run_gcmc_titration_kernel(
                 float w[WATER_SIZE];
                 water_model::create_water_std(0u, w);
 
-                randomize_water_axis_angle(ax, ay, az, angle_rad, w);
+                // Same three uniforms the displacement branch uses as its
+                // rotation axis, so the random stream is unchanged.
+                randomize_water_uniform(ax, ay, az, w);
                 propose_insertion_xyz(ins_x, ins_y, ins_z, (float)possible_resnum, w);
 
 #pragma unroll
@@ -322,12 +335,21 @@ __global__ void run_gcmc_titration_kernel(
 
             if (diag_on) w_proposed[move_type] += 1ull;
 
+            // Move selection is not uniform: with no water present the step
+            // always proposes an insertion, otherwise each move type is picked
+            // with probability 1/n_moves. Detailed balance between N = 0 and
+            // N = 1 needs that asymmetry in the acceptance ratio: insertion
+            // into an empty region is proposed n_moves times more often than
+            // the deletion that empties it, so the former is scaled by
+            // 1/n_moves and the latter by n_moves. Without it P(N>=1)/P(N=0)
+            // comes out n_moves (3x) too large.
             if (move_type == 0) {
                 const float new_energy = e_rec_new + e_wat_new;
                 const float delta_e = new_energy;
 
-                const float pref = (1.0f / (float)(active_local + 1u)) * expf(B);
-                const float p_acc = fminf(pref * expf(-(float)BETA * delta_e), 1.0f);
+                float pref = (1.0f / (float)(active_local + 1u)) * expf(B);
+                if (active_local == 0u) pref /= (float)n_moves;
+                const float p_acc = metropolis_probability(pref, delta_e);
 
                 // With grow_on_full the block never gets here at capacity
                 // (it stops at the top of the step instead), so this guard
@@ -349,8 +371,9 @@ __global__ void run_gcmc_titration_kernel(
                 const float contrib = e_rec_new + e_wat_new;
                 const float delta_e = -contrib;
 
-                const float pref = (float)active_local * expf(-B);
-                const float p_acc = fminf(pref * expf(-(float)BETA * delta_e), 1.0f);
+                float pref = (float)active_local * expf(-B);
+                if (active_local == 1u) pref *= (float)n_moves;  // see the insertion branch
+                const float p_acc = metropolis_probability(pref, delta_e);
                 if (u < p_acc) {
                     const uint32_t del_idx = sh_tgt_idx;
                     const size_t dst  = mu_waters_base + (size_t)del_idx * WATER_SIZE;
@@ -370,7 +393,7 @@ __global__ void run_gcmc_titration_kernel(
                 const float newE = e_rec_new + e_wat_new;
                 const float delta_e = newE - oldE;
 
-                const float p_acc = fminf(expf(-(float)BETA * delta_e), 1.0f);
+                const float p_acc = metropolis_probability(1.0f, delta_e);
 
                 if (u < p_acc) {
                     const uint32_t tgt = sh_tgt_idx;

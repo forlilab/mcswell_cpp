@@ -116,7 +116,7 @@ py::dict run_mcswell_py(
     bool dump_debug_pdbs = false,
     std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
     std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
-    bool constrain_displacement = false,
+    bool constrain_displacement = true,
     std::array<double, 3> box_center = {0.0, 0.0, 0.0},
     std::array<double, 3> box_halfsize = {0.0, 0.0, 0.0},
     double min_distance = 1.5,
@@ -127,7 +127,11 @@ py::dict run_mcswell_py(
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
 
     InsertionGrid cavity;
-    if (constrain_displacement) {
+    const bool have_box = box_halfsize[0] > 0.0 || box_halfsize[1] > 0.0 || box_halfsize[2] > 0.0;
+    if (constrain_displacement && !have_box) {
+        // No box to rebuild the lattice from: the points define it.
+        cavity = insertion_grid_from_points(ptr, n_points, spacing);
+    } else if (constrain_displacement) {
         cavity = rebuild_cavity_grid(receptor_points, box_center, box_halfsize, spacing,
                                      distance_cutoff, min_distance);
         if (cavity.n_points() != n_points) {
@@ -199,7 +203,7 @@ py::dict run_mcswell_and_analyze_py(
     bool dump_debug_pdbs = false,
     std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
     std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
-    bool constrain_displacement = false,
+    bool constrain_displacement = true,
     double min_distance = 1.5,
     std::size_t max_waters = 0
 ) {
@@ -345,7 +349,7 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("dump_debug_pdbs") = false,
       py::arg("n_diagnostic_windows") = DEFAULT_DIAGNOSTIC_WINDOWS,
       py::arg("diagnostic_energy_stride") = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
-      py::arg("constrain_displacement") = false,
+      py::arg("constrain_displacement") = true,
       py::arg("box_center") = std::array<double, 3>{0.0, 0.0, 0.0},
       py::arg("box_halfsize") = std::array<double, 3>{0.0, 0.0, 0.0},
       py::arg("min_distance") = 1.5,
@@ -362,7 +366,10 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       "insertions, mean and final water counts, and the water-subsystem "
       "energy, as (n_mu, n_windows[, 3]) arrays). Set n_diagnostic_windows=0 "
       "to switch the instrumentation off; it draws no random numbers, so "
-      "leaving it on does not perturb the chain. Nothing is written to disk "
+      "leaving it on does not perturb the chain. constrain_displacement "
+      "(default True) keeps displaced waters inside the sampled region; the "
+      "region is rebuilt from box_center/box_halfsize when given, otherwise "
+      "taken from the boundaries themselves. Nothing is written to disk "
       "unless dump_debug_pdbs is set. Prefer run_mcswell_and_analyze for "
       "normal use.");
 
@@ -401,7 +408,7 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("dump_debug_pdbs") = false,
       py::arg("n_diagnostic_windows") = DEFAULT_DIAGNOSTIC_WINDOWS,
       py::arg("diagnostic_energy_stride") = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
-      py::arg("constrain_displacement") = false,
+      py::arg("constrain_displacement") = true,
       py::arg("min_distance") = 1.5,
       py::arg("max_waters") = 0,
       "Run the GCMC titration and the requested post-simulation "
@@ -418,7 +425,9 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       "constrain_displacement=True rejects displacement moves that would "
       "carry a water out of the sampled region, so insertion and deletion "
       "act on the same region (min_distance must match the value used to "
-      "build the boundaries). Default False preserves historical behaviour.\n\n"
+      "build the boundaries). It is on by default: without it waters drift "
+      "out of the region (and the box), where insertion cannot reach them, "
+      "breaking detailed balance and inflating N.\n\n"
       "The number of waters per window is unlimited by default: the water "
       "buffer grows on demand. max_waters > 0 sets a hard limit (insertions "
       "beyond it are refused and counted as capacity-blocked), and the "

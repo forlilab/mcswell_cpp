@@ -65,6 +65,13 @@ InsertionGrid make_insertion_grid(
     double min_distance = 1.5
 );
 
+// The InsertionGrid of an existing point list: the lattice is regular, so
+// the points themselves fix it (origin = the per-axis minimum, which is
+// always a lattice coordinate). Throws if a point is off that lattice.
+// Lets the displacement constraint be built when only the points, not the
+// box that generated them, are known.
+InsertionGrid insertion_grid_from_points(const float* points_xyz, std::size_t n_points, double spacing);
+
 // Returns (N,3) points flattened as {x0,y0,z0, x1,y1,z1, ...}
 std::vector<double> make_insertion_points_flat(
     const std::vector<Atom>& atoms,

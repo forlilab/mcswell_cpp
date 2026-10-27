@@ -390,6 +390,11 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     # Hard limit on the waters per mu window. 0 (the default) means none: the
     # water buffer grows on demand, so high-mu windows are no longer truncated.
     max_waters = int(config["simulation_parameters"].get("max_waters", 0))
+    # Reject displacement moves that would carry a water out of the sampled
+    # region. Without it waters drift out of the region and the box, where
+    # insertion cannot reach them: detailed balance breaks and N is inflated.
+    # false only to reproduce runs made before this became the default.
+    constrain_displacement = bool(config["simulation_parameters"].get("constrain_displacement", True))
 
     #mu_range
     mu_values = expand_ranges(config["mu_range"])
@@ -416,13 +421,15 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
 
     print(f"Starting MCSwell! (GCMC seed: {seed})")
     center = [center_x, center_y, center_z]
+    # Shared with the displacement constraint, which rebuilds this lattice.
+    min_distance = 1.5
     pts = mc.make_insertion_points(
          parametrized_atoms,
          size=(x_size, y_size, z_size),
          spacing=spacing,
          center=center,
          max_distance=distance_cutoff,
-         min_distance=1.5,
+         min_distance=min_distance,
      )
 
     #gci
@@ -477,6 +484,8 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         n_diagnostic_windows=n_diagnostic_windows,
         diagnostic_energy_stride=diagnostic_energy_stride,
         max_waters=max_waters,
+        constrain_displacement=constrain_displacement,
+        min_distance=min_distance,
     )
 
     exec_time = time.time() - start

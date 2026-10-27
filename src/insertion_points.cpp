@@ -17,9 +17,11 @@
 //  License along with this library; if not, write to the Free Software
 //  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "insertion_points.hpp"
 #include "atom.hpp"
@@ -95,6 +97,48 @@ InsertionGrid make_insertion_grid(
         }
     }
 
+    return out;
+}
+
+InsertionGrid insertion_grid_from_points(const float* points_xyz, std::size_t n_points, double spacing) {
+    if (n_points == 0 || spacing <= 0.0) {
+        throw std::invalid_argument("insertion_grid_from_points: need points and a positive spacing");
+    }
+    InsertionGrid out;
+    out.spacing = spacing;
+    std::array<double, 3> hi{};
+    for (int a = 0; a < 3; ++a) {
+        out.origin[a] = std::numeric_limits<double>::infinity();
+        hi[a] = -std::numeric_limits<double>::infinity();
+    }
+    for (std::size_t p = 0; p < n_points; ++p) {
+        for (int a = 0; a < 3; ++a) {
+            const double v = points_xyz[3 * p + a];
+            out.origin[a] = std::min(out.origin[a], v);
+            hi[a] = std::max(hi[a], v);
+        }
+    }
+    for (int a = 0; a < 3; ++a) {
+        out.dims[a] = static_cast<std::int64_t>(std::llround((hi[a] - out.origin[a]) / spacing)) + 1;
+    }
+    out.mask.assign(static_cast<std::size_t>(out.dims[0] * out.dims[1] * out.dims[2]), 0u);
+    out.points_xyz.reserve(3 * n_points);
+
+    for (std::size_t p = 0; p < n_points; ++p) {
+        std::int64_t idx[3];
+        for (int a = 0; a < 3; ++a) {
+            const double v = points_xyz[3 * p + a];
+            const double f = (v - out.origin[a]) / spacing;
+            idx[a] = static_cast<std::int64_t>(std::llround(f));
+            // Points arrive as float32; allow for that rounding, nothing more.
+            if (std::fabs(f - static_cast<double>(idx[a])) > 1e-3) {
+                throw std::invalid_argument("insertion_grid_from_points: point " + std::to_string(p) +
+                                            " is not on a lattice of spacing " + std::to_string(spacing));
+            }
+            out.points_xyz.push_back(v);
+        }
+        out.mask[out.index(idx[0], idx[1], idx[2])] = 1u;
+    }
     return out;
 }
 
