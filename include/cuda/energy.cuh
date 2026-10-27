@@ -429,6 +429,12 @@ float eval_energy_with_receptor(
     }
 
     // block reduction
+    //
+    // The leading barrier guards the sh_partials buffer across *consecutive*
+    // calls: without it a fast thread can overwrite sh_partials[0] here while a
+    // slow thread is still reading the previous call's result off it, which is
+    // exactly what the receptor-then-waters call pairs do.
+    __syncthreads();
     sh_partials[tid] = partial;
     __syncthreads();
 
@@ -582,6 +588,9 @@ float eval_energy_with_waters(
 #endif
     }
 
+    // See the matching comment in eval_energy_with_receptor: the leading
+    // barrier is what makes back-to-back calls sharing sh_partials safe.
+    __syncthreads();
     sh_partials[tid] = partial;
     __syncthreads();
 

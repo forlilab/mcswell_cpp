@@ -287,7 +287,14 @@ __global__ void run_gcmc_titration_kernel(
 
             sh_active = active_local;
 
-            if (step > equil_steps_local && steps_between_snaps > 0) {
+            // `step >= equil`, not `>`: with a strict `>` the first snapshot
+            // offset is 1 instead of 0, the offsets 0, S, ..., (n-1)S no longer
+            // all fit in the production phase, and the last snapshot slot is
+            // left at its memset zeros -- which post-processing then reads back
+            // as a real frame containing no waters. That one phantom empty
+            // frame biased every site occupancy low by 1/n_snapshots and
+            // dominated the reported N_region_std.
+            if (step >= equil_steps_local && steps_between_snaps > 0) {
                 if (((step - equil_steps_local) % steps_between_snaps) == 0 && sh_snap_id < n_snapshots) {
 
                     const uint32_t base =

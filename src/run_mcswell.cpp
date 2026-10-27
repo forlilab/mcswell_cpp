@@ -73,6 +73,21 @@ TitrationResult run_mcswell_gpu_titration(
     if (mu_values.empty()) throw std::invalid_argument("mu_values is empty");
     if (n_snapshots == 0) throw std::invalid_argument("n_snapshots must be > 0");
     if (receptor_points.empty()) throw std::invalid_argument("receptor_points is empty");
+    if (equilibration_steps > gcmc_steps) {
+        throw std::invalid_argument("equilibration_steps must be <= gcmc_steps");
+    }
+    // The kernel's snapshot stride is (gcmc_steps - equilibration_steps) /
+    // n_snapshots in integer arithmetic. Too short a production phase makes
+    // that 0, which silently skips every snapshot and hands the analyses
+    // n_snapshots all-zero frames -- i.e. a titration curve pinned at N = 0
+    // rather than an error.
+    if (gcmc_steps - equilibration_steps < n_snapshots) {
+        throw std::invalid_argument(
+            "production phase (gcmc_steps - equilibration_steps = " +
+            std::to_string(gcmc_steps - equilibration_steps) +
+            ") must be at least n_snapshots (" + std::to_string(n_snapshots) +
+            ") so that every snapshot slot gets a frame");
+    }
 
     const int n_mu = static_cast<int>(mu_values.size());
 
