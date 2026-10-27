@@ -442,6 +442,8 @@ writes only the final result artifacts:
   box.pdb, system_cleaned.pdb        # pre-simulation setup, from OpenMM
   acceptance_summary.csv             # sampling diagnostics, per (mu, phase)
   acceptance_windows.csv             # sampling diagnostics, per (mu, window)
+  acceptance_by_mu.png               # production acceptance rate per move vs mu
+  n_waters_trace.png                 # water count over the run, equilibration check
   gci/<peak_percentile>_binomial/    # independent-site binomial fit
     sites.csv, sites.pdb, sites_all.csv, titration.csv,
     titration_diagnostics.csv, capacity_diagnostics.csv, gO.dx,
@@ -460,6 +462,24 @@ of the three move types, the resulting acceptance rates, insertions refused by
 `max_waters` (always 0 without one), and the mean and final water count.
 `acceptance_windows.csv` is the same breakdown resolved per window, plus the
 water-subsystem energy, and is what a convergence analysis reads.
+
+`run_mcswell.py` draws both tables (`python/plot_acceptance.py`, also usable
+standalone as `python python/plot_acceptance.py <save_path> --mu-bulk <mu>`):
+
+- `acceptance_by_mu.png` -- production-phase acceptance rate of each move type
+  against µ on a log scale, with ⟨N⟩(µ) underneath for context. Moves proposed
+  but never accepted sit in a separate "0%" row; moves never proposed (no water
+  to delete or displace) are gaps, not zeros. Above the very dilute regime the
+  insertion and deletion curves should coincide: at equilibrium both are
+  proposed equally often and accepted equally often.
+- `n_waters_trace.png` -- the water count over the whole run at six µ values
+  spread across the titration (the one nearest bulk µ always among them), with
+  the equilibration phase shaded and the production mean dashed. Each panel
+  carries a verdict from `python/convergence.py`: equilibrated, stationary only
+  after the configured equilibration (the detected point is drawn dotted), or
+  still changing at the end of the run. Anything but "equilibrated" means that
+  µ needs a longer equilibration phase or a longer run before its ⟨N⟩ can be
+  trusted.
 
 `python/convergence.py` turns that trace into the usual Markov-chain
 diagnostics — statistical inefficiency, integrated autocorrelation time in MC

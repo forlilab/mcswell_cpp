@@ -28,6 +28,7 @@ from utils import *
 import tomllib
 import estimate_free_energies as fe
 import estimate_free_energies_GCI as fe_gci
+import plot_acceptance
 from rdkit import Chem
 from rdkit.Chem import SDMolSupplier
 from openmm.app import *
@@ -584,3 +585,6 @@ if __name__ == "__main__":
         fe.main(run_info["binomial_output_dir"], mu_bulk=run_info["mu_bulk"])
     if run_info["gci_output_dir"]:
         fe_gci.main(run_info["gci_output_dir"])
+    if run_info["acceptance_summary_csv"]:
+        plot_acceptance.main(os.path.dirname(run_info["acceptance_summary_csv"]),
+                             mu_bulk=run_info["mu_bulk"])
