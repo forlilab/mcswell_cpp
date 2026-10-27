@@ -22,12 +22,15 @@
 #include <iostream>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "snapshots_io.hpp"
@@ -43,6 +46,85 @@ inline void cuda_check(cudaError_t e, const char* what) {
     }
 }
 
+// Closest two pre-filled oxygens may be: about the first minimum-free contact
+// of liquid water, so the start has no hard overlaps to resolve.
+constexpr double PREFILL_MIN_OO = 2.8;
+
+// Waters for a pre-filled start: oxygens on insertion points visited in random
+// order, each kept if it is at least PREFILL_MIN_OO from every oxygen kept so
+// far, until n_target are placed (or the points run out); each gets a uniform
+// random orientation. Returns WATER_SIZE floats per water, in the kernel's
+// compact layout. Random sequential packing at this distance jams close to
+// bulk water density, so n_target = the bulk estimate is about what fits.
+std::vector<float> prefill_waters(const float* points_xyz, std::size_t n_points, std::size_t n_target,
+                                  std::uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    std::vector<std::size_t> order(n_points);
+    for (std::size_t i = 0; i < n_points; ++i) order[i] = i;
+    std::shuffle(order.begin(), order.end(), rng);
+
+    // Hash of kept oxygens by cell of side PREFILL_MIN_OO: a clash can only
+    // be with an oxygen in one of the 27 surrounding cells.
+    const auto cell_of = [](double v) { return static_cast<std::int64_t>(std::floor(v / PREFILL_MIN_OO)); };
+    const auto key = [](std::int64_t i, std::int64_t j, std::int64_t k) {
+        return ((i * 73856093) ^ (j * 19349663) ^ (k * 83492791));
+    };
+    std::unordered_map<std::int64_t, std::vector<std::array<double, 3>>> cells;
+
+    float templ[WATER_SIZE];
+    water_model::create_water_std(0u, templ);
+
+    std::vector<float> out;
+    out.reserve(n_target * WATER_SIZE);
+    std::size_t placed = 0;
+    for (std::size_t idx = 0; idx < n_points && placed < n_target; ++idx) {
+        const float* p = points_xyz + 3 * order[idx];
+        const std::array<double, 3> o{p[0], p[1], p[2]};
+        const std::int64_t ci = cell_of(o[0]), cj = cell_of(o[1]), ck = cell_of(o[2]);
+        bool clash = false;
+        for (std::int64_t di = -1; di <= 1 && !clash; ++di)
+            for (std::int64_t dj = -1; dj <= 1 && !clash; ++dj)
+                for (std::int64_t dk = -1; dk <= 1 && !clash; ++dk) {
+                    const auto it = cells.find(key(ci + di, cj + dj, ck + dk));
+                    if (it == cells.end()) continue;
+                    for (const auto& q : it->second) {
+                        const double dx = q[0] - o[0], dy = q[1] - o[1], dz = q[2] - o[2];
+                        if (dx * dx + dy * dy + dz * dz < PREFILL_MIN_OO * PREFILL_MIN_OO) { clash = true; break; }
+                    }
+                }
+        if (clash) continue;
+        cells[key(ci, cj, ck)].push_back(o);
+
+        // Uniform random orientation (Shoemake), as for kernel insertions.
+        const double u1 = unif(rng), u2 = 2.0 * M_PI * unif(rng), u3 = 2.0 * M_PI * unif(rng);
+        const double qx = std::sqrt(1.0 - u1) * std::sin(u2), qy = std::sqrt(1.0 - u1) * std::cos(u2);
+        const double qz = std::sqrt(u1) * std::sin(u3), qw = std::sqrt(u1) * std::cos(u3);
+        const auto rotate = [&](double vx, double vy, double vz, double* r) {
+            // v' = v + 2 qw (q x v) + 2 q x (q x v)
+            const double tx = 2.0 * (qy * vz - qz * vy), ty = 2.0 * (qz * vx - qx * vz), tz = 2.0 * (qx * vy - qy * vx);
+            r[0] = vx + qw * tx + (qy * tz - qz * ty);
+            r[1] = vy + qw * ty + (qz * tx - qx * tz);
+            r[2] = vz + qw * tz + (qx * ty - qy * tx);
+        };
+
+        ++placed;
+        const float resnum = static_cast<float>(placed);
+        float w[WATER_SIZE];
+        w[OX] = p[0]; w[OY] = p[1]; w[OZ] = p[2]; w[ORES] = resnum;
+        const int h_slots[2] = {H1X, H2X};
+        for (int s : h_slots) {
+            double r[3];
+            rotate(templ[s] - templ[OX], templ[s + 1] - templ[OY], templ[s + 2] - templ[OZ], r);
+            w[s] = static_cast<float>(o[0] + r[0]);
+            w[s + 1] = static_cast<float>(o[1] + r[1]);
+            w[s + 2] = static_cast<float>(o[2] + r[2]);
+            w[s + 3] = resnum;
+        }
+        out.insert(out.end(), w, w + WATER_SIZE);
+    }
+    return out;
+}
 } // namespace
 
 // - build receptor_atoms_buffer (flattened float)
@@ -72,12 +154,17 @@ TitrationResult run_mcswell_gpu_titration(
     const InsertionGrid* cavity_grid,
     bool constrain_displacement,
     std::size_t max_waters,
-    std::size_t snapshot_buffer_bytes
+    std::size_t snapshot_buffer_bytes,
+    double max_rotation_deg,
+    double prefill_above_mu
 ) {
     // -------------------------
     // Input checks
     // -------------------------
     if (spacing <= 0.0f) throw std::invalid_argument("spacing must be > 0");
+    if (!(max_rotation_deg > 0.0 && max_rotation_deg <= 180.0)) {
+        throw std::invalid_argument("max_rotation_deg must be in (0, 180]");
+    }
     if (!insertion_points_xyz) throw std::invalid_argument("insertion_points_xyz is null");
     if (n_points == 0) throw std::invalid_argument("n_points must be > 0");
     if (mu_values.empty()) throw std::invalid_argument("mu_values is empty");
@@ -203,6 +290,7 @@ TitrationResult run_mcswell_gpu_titration(
               << "  diagnostic_windows: " << n_diag_windows
               << " (" << steps_per_diag_window << " steps each, energy every "
               << std::max<std::size_t>(diagnostic_energy_stride, 1) << ")\n"
+              << "  max displacement rotation: " << max_rotation_deg << " deg\n"
               << "  save_path: " << save_path << "\n";
 
     // -------------------------
@@ -230,12 +318,34 @@ TitrationResult run_mcswell_gpu_titration(
                           cudaMemcpyHostToDevice),
                "cudaMemcpy receptor");
 
-    // waters (zero)
+    // waters (zero, then the pre-filled windows' starting waters)
     const std::size_t waters_bytes = static_cast<std::size_t>(n_mu) * water_capacity * WATER_SIZE * sizeof(float);
     cuda_check(cudaMalloc(&d_waters, waters_bytes), "cudaMalloc d_waters");
     cuda_check(cudaMemset(d_waters, 0, waters_bytes), "cudaMemset d_waters");
 
-    // wat_num (zero)
+    std::size_t n_prefilled = 0, prefill_min = std::numeric_limits<std::size_t>::max(), prefill_max = 0;
+    for (int mu = 0; mu < n_mu; ++mu) {
+        if (!(static_cast<double>(mu_values[mu]) > prefill_above_mu)) continue;
+        // Seeded from the run seed and the window, so a pre-filled run is as
+        // reproducible as an empty-start one.
+        const auto start = prefill_waters(insertion_points_xyz, n_points, water_capacity,
+                                          seed ^ (0x9E3779B97F4A7C15ULL * static_cast<std::uint64_t>(mu + 1)));
+        const std::size_t n = start.size() / WATER_SIZE;
+        cuda_check(cudaMemcpy(d_waters + static_cast<std::size_t>(mu) * water_capacity * WATER_SIZE, start.data(),
+                              start.size() * sizeof(float), cudaMemcpyHostToDevice),
+                   "cudaMemcpy pre-filled waters");
+        h_wat_num[mu] = static_cast<std::uint32_t>(n);
+        ++n_prefilled;
+        prefill_min = std::min(prefill_min, n);
+        prefill_max = std::max(prefill_max, n);
+    }
+    if (n_prefilled > 0) {
+        std::cout << "  pre-filled " << n_prefilled << " window(s) (mu > " << prefill_above_mu << ") with "
+                  << prefill_min << (prefill_max != prefill_min ? "-" + std::to_string(prefill_max) : "")
+                  << " waters (bulk estimate " << water_capacity << ")\n";
+    }
+
+    // wat_num
     cuda_check(cudaMalloc(&d_wat_num, static_cast<std::size_t>(n_mu) * sizeof(std::uint32_t)),
                "cudaMalloc d_wat_num");
     cuda_check(cudaMemcpy(d_wat_num, h_wat_num.data(),
@@ -429,6 +539,7 @@ TitrationResult run_mcswell_gpu_titration(
                 /*n_snapshots*/    static_cast<std::uint32_t>(n_snapshots),
                 /*water_capacity*/ static_cast<std::uint32_t>(water_capacity),
                 /*grow_on_full*/   grow_on_full,
+                /*max_rotation*/   static_cast<float>(max_rotation_deg * M_PI / 180.0),
                 /*rng_states*/     d_states,
                 /*carry*/          carry,
                 /*arena*/          arena,

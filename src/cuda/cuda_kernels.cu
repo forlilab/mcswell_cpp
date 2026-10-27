@@ -86,6 +86,7 @@ __global__ void run_gcmc_titration_kernel(
     std::uint32_t n_snapshots,
     std::uint32_t water_capacity,
     bool grow_on_full,
+    float max_rotation_rad,
     curandStatePhilox4_32_10_t* states,
     TitrationCarry carry,
     SnapshotArena arena,
@@ -229,7 +230,12 @@ __global__ void run_gcmc_titration_kernel(
             const float ay = randu(&st);
             const float az = randu(&st);
 
-            const float angle_rad = rand_range(&st, -180.0f, 180.0f) * (CUDART_PI_F / 180.0f);
+            // Displacement rotation angle, uniform in +-max_rotation_rad. The
+            // proposal stays symmetric (the reverse move is the same axis with
+            // the opposite angle) for any cap, so the cap only tunes the
+            // acceptance rate: a full +-180 deg reorientation inside a
+            // hydrogen-bonded network is almost always rejected.
+            const float angle_rad = rand_range(&st, -max_rotation_rad, max_rotation_rad);
             const float u = randu(&st);
 
             const uint32_t tgt_idx = (active > 0) ? (uint32_t)rand_int(&st, (int)active) : 0u;

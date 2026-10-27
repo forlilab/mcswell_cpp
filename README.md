@@ -266,6 +266,8 @@ Omit this section for receptor-only hydration.
 | `simulation_parameters.diagnostic_energy_stride` |  | int | ≥ 1, default `1` | `20` |
 | `simulation_parameters.max_waters` |  | int | ≥ 0, default `0` (no limit) | `0` |
 | `simulation_parameters.constrain_displacement` |  | bool | default `true` | `true` |
+| `simulation_parameters.initial_fill` |  | string | `"auto"` (default), `"empty"`, `"full"` | `"auto"` |
+| `simulation_parameters.max_rotation_deg` |  | float | (0, 180], default `30` | `30` |
 
 `constrain_displacement` rejects displacement moves that would carry a water
 out of the sampled region (the insertion lattice's voxels). Without it waters
@@ -273,6 +275,19 @@ drift out of the region and out of the box, where insertion can no longer
 reach them: detailed balance breaks and the titration's N is inflated (in the
 example, 17-38% of the waters ended up outside the box). Set it to `false`
 only to reproduce runs made before it became the default.
+
+`initial_fill` sets each µ window's starting state. `"auto"` starts the
+windows above bulk µ pre-filled (bulk density, waters at least 2.8 Å apart on
+random insertion points, random orientations) and the rest empty: an empty
+start at high µ spends most of the run inserting waters one at a time, since
+insertion is rarely accepted in dense water. `"empty"` and `"full"` apply one
+start to every window; the stationary distribution is the same either way, so
+running both and comparing ⟨N⟩ is a direct equilibration check.
+
+`max_rotation_deg` caps the rotation a displacement move applies. Any value is
+valid; full ±180° reorientations are almost always rejected in a
+hydrogen-bonded network, so the 30° default keeps displacement acceptance
+useful.
 
 There is no limit on the number of waters per µ window. The water buffer
 starts at the bulk-water estimate (insertion volume × 0.0334 Å⁻³) and doubles

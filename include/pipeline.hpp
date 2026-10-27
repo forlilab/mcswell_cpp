@@ -66,6 +66,7 @@ PipelineResult run_mcswell_full_pipeline(
     std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
     std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
     const InsertionGrid* cavity_grid = nullptr, bool constrain_displacement = false,
-    std::size_t max_waters = 0, std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES);
+    std::size_t max_waters = 0, std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES,
+    double max_rotation_deg = DEFAULT_MAX_ROTATION_DEG, double prefill_above_mu = NO_PREFILL);
 
 } // namespace mcswell

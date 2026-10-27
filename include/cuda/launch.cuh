@@ -52,6 +52,7 @@ void run_gcmc_titration_launch(
     std::uint32_t n_snapshots,
     std::uint32_t water_capacity,     // per-mu stride of d_waters, in waters
     bool grow_on_full,                // stop at water_capacity (to grow) instead of refusing insertions
+    float max_rotation_rad,           // displacement rotation angle drawn from +-this
 
     void* d_states,                  // opaque RNG states (n_mu * dummy_rng_state_bytes())
 

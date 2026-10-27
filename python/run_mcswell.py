@@ -390,11 +390,23 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     # Hard limit on the waters per mu window. 0 (the default) means none: the
     # water buffer grows on demand, so high-mu windows are no longer truncated.
     max_waters = int(config["simulation_parameters"].get("max_waters", 0))
+    # Largest rotation of a displacement move, in degrees (0, 180]. Full
+    # random reorientations are almost always rejected in dense water.
+    max_rotation_deg = float(config["simulation_parameters"].get("max_rotation_deg", 30.0))
     # Reject displacement moves that would carry a water out of the sampled
     # region. Without it waters drift out of the region and the box, where
     # insertion cannot reach them: detailed balance breaks and N is inflated.
     # false only to reproduce runs made before this became the default.
     constrain_displacement = bool(config["simulation_parameters"].get("constrain_displacement", True))
+    # Starting state of each mu window: "auto" pre-fills the windows above
+    # bulk mu (an empty start there spends the run filling one insertion at a
+    # time) and starts the rest empty; "empty" / "full" apply one start to
+    # every window. Running "empty" and "full" and comparing is a direct
+    # equilibration check.
+    initial_fill = str(config["simulation_parameters"].get("initial_fill", "auto")).lower()
+    if initial_fill not in ("auto", "empty", "full"):
+        raise ValueError(f"simulation_parameters.initial_fill must be 'auto', 'empty' or 'full', "
+                         f"not {initial_fill!r}")
 
     #mu_range
     mu_values = expand_ranges(config["mu_range"])
@@ -447,6 +459,7 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     mu_bulk, mu_bulk_water_model, mu_bulk_source = resolve_mu_bulk(
         None if mu_bulk_override is None else float(mu_bulk_override)
     )
+    prefill_above_mu = {"auto": mu_bulk, "empty": float("inf"), "full": float("-inf")}[initial_fill]
 
     start = time.time()
     print("Performing TITRATION and GRAND CANONICAL INTEGRATION")
@@ -484,6 +497,8 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         n_diagnostic_windows=n_diagnostic_windows,
         diagnostic_energy_stride=diagnostic_energy_stride,
         max_waters=max_waters,
+        max_rotation_deg=max_rotation_deg,
+        prefill_above_mu=prefill_above_mu,
         constrain_displacement=constrain_displacement,
         min_distance=min_distance,
     )

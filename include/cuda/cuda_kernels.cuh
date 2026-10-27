@@ -51,6 +51,7 @@ __global__ void run_gcmc_titration_kernel(
     std::uint32_t n_snapshots,
     std::uint32_t water_capacity,                // per-mu stride of d_waters, in waters
     bool grow_on_full,                           // stop at water_capacity instead of refusing insertions
+    float max_rotation_rad,                      // displacement rotation angle drawn from +-this
     curandStatePhilox4_32_10_t* states,
     TitrationCarry carry,
     SnapshotArena arena,

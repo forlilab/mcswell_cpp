@@ -58,6 +58,7 @@ void run_gcmc_titration_launch(
     std::uint32_t n_snapshots,
     std::uint32_t water_capacity,
     bool grow_on_full,
+    float max_rotation_rad,
 
     void* d_states,
 
@@ -96,6 +97,7 @@ void run_gcmc_titration_launch(
         n_snapshots,
         water_capacity,
         grow_on_full,
+        max_rotation_rad,
         states,
         carry,
         arena,

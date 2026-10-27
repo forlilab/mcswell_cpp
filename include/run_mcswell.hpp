@@ -21,6 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,14 @@ inline constexpr std::size_t DEFAULT_DIAGNOSTIC_ENERGY_STRIDE = 1;
 // bounds the device-side cost of snapshots regardless of run length or water
 // count; a smaller value only means more frequent copies.
 inline constexpr std::size_t DEFAULT_SNAPSHOT_BUFFER_BYTES = std::size_t(256) << 20;
+
+// Largest rotation (degrees) a displacement move applies. Any cap keeps the
+// move valid; 30 deg keeps displacement acceptance in a useful range in dense
+// water, where full random reorientations (180) are accepted a few % of the time.
+inline constexpr double DEFAULT_MAX_ROTATION_DEG = 30.0;
+
+// prefill_above_mu value meaning "start every window empty".
+inline constexpr double NO_PREFILL = std::numeric_limits<double>::infinity();
 
 struct TitrationResult {
     // Every snapshot of every mu window, unpadded.
@@ -75,6 +84,14 @@ struct TitrationResult {
 //
 // `max_waters` > 0 restores a hard limit: insertions beyond it are refused
 // (and counted in diagnostics.capacity_blocked), as the fixed buffer did.
+//
+// `prefill_above_mu`: windows whose mu is above it start from a pre-filled
+// region (bulk density, waters at least 2.8 A apart on random insertion
+// points, uniform random orientations) instead of empty. At high mu an empty
+// start spends most of the run inserting waters one at a time; a full start
+// relaxes by exchange instead. The stationary distribution is the same either
+// way, so running once with -inf (all full) and once with NO_PREFILL (all
+// empty) and comparing is a direct equilibration check.
 //
 // `dump_debug_pdbs`: if true, also writes one PDB per (mu, snapshot) under
 // save_path/frames/ for visual inspection (PyMOL/VMD). Off by default --
@@ -105,5 +122,7 @@ TitrationResult run_mcswell_gpu_titration(
     const InsertionGrid* cavity_grid = nullptr,
     bool constrain_displacement = false,
     std::size_t max_waters = 0,
-    std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES
+    std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES,
+    double max_rotation_deg = DEFAULT_MAX_ROTATION_DEG,
+    double prefill_above_mu = NO_PREFILL
 );

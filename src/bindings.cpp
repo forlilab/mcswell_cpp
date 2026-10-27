@@ -121,7 +121,9 @@ py::dict run_mcswell_py(
     std::array<double, 3> box_halfsize = {0.0, 0.0, 0.0},
     double min_distance = 1.5,
     std::size_t max_waters = 0,
-    std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES
+    std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES,
+    double max_rotation_deg = DEFAULT_MAX_ROTATION_DEG,
+    double prefill_above_mu = NO_PREFILL
 ) {
     const std::size_t n_points = n_points_from_boundaries(boundaries_xyz);
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
@@ -146,7 +148,8 @@ py::dict run_mcswell_py(
     const auto result = run_mcswell_gpu_titration(
         receptor_points, ptr, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps, save_path,
         mu_values, n_snapshots, seed, dump_debug_pdbs, n_diagnostic_windows, diagnostic_energy_stride,
-        constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters, snapshot_buffer_bytes
+        constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters, snapshot_buffer_bytes,
+        max_rotation_deg, prefill_above_mu
     );
 
     const auto& snaps = result.snapshots;
@@ -205,7 +208,9 @@ py::dict run_mcswell_and_analyze_py(
     std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
     bool constrain_displacement = true,
     double min_distance = 1.5,
-    std::size_t max_waters = 0
+    std::size_t max_waters = 0,
+    double max_rotation_deg = DEFAULT_MAX_ROTATION_DEG,
+    double prefill_above_mu = NO_PREFILL
 ) {
     const std::size_t n_points = n_points_from_boundaries(boundaries_xyz);
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
@@ -245,7 +250,8 @@ py::dict run_mcswell_and_analyze_py(
     const auto result = mcswell::run_mcswell_full_pipeline(
         receptor_points, ptr, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps, save_path,
         mu_values, n_snapshots, cfg, run_binomial, run_gci, seed, dump_debug_pdbs, n_diagnostic_windows,
-        diagnostic_energy_stride, constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters
+        diagnostic_energy_stride, constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters,
+        DEFAULT_SNAPSHOT_BUFFER_BYTES, max_rotation_deg, prefill_above_mu
     );
 
     py::dict out;
@@ -355,6 +361,8 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("min_distance") = 1.5,
       py::arg("max_waters") = 0,
       py::arg("snapshot_buffer_bytes") = DEFAULT_SNAPSHOT_BUFFER_BYTES,
+      py::arg("max_rotation_deg") = DEFAULT_MAX_ROTATION_DEG,
+      py::arg("prefill_above_mu") = NO_PREFILL,
       "Run the GCMC titration only (no post-simulation analysis). Returns "
       "a dict with every snapshot in memory as 'waters' (an (N, 12) float32 "
       "array) and 'offsets' (n_mu * n_snapshots + 1 entries: frame "
@@ -411,6 +419,8 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("constrain_displacement") = true,
       py::arg("min_distance") = 1.5,
       py::arg("max_waters") = 0,
+      py::arg("max_rotation_deg") = DEFAULT_MAX_ROTATION_DEG,
+      py::arg("prefill_above_mu") = NO_PREFILL,
       "Run the GCMC titration and the requested post-simulation "
       "analyses (binomial site-occupancy fit and/or ProtoMS-style GCI) "
       "entirely in memory: no per-snapshot PDB is written to disk. "
@@ -431,5 +441,9 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       "The number of waters per window is unlimited by default: the water "
       "buffer grows on demand. max_waters > 0 sets a hard limit (insertions "
       "beyond it are refused and counted as capacity-blocked), and the "
-      "capacity filter then excludes windows that run into it.");
+      "capacity filter then excludes windows that run into it.\n\n"
+      "max_rotation_deg caps the rotation a displacement move applies "
+      "(default 30). Windows with mu > prefill_above_mu start pre-filled at "
+      "bulk density instead of empty (default: none; pass -inf for all, and "
+      "compare with an all-empty run to check equilibration).");
 }

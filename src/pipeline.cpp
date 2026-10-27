@@ -32,13 +32,15 @@ PipelineResult run_mcswell_full_pipeline(
     const analysis::PostAnalysisConfig& analysis_cfg, bool run_binomial, bool run_gci, std::uint64_t seed,
     bool dump_debug_pdbs, std::size_t n_diagnostic_windows,
     std::size_t diagnostic_energy_stride, const InsertionGrid* cavity_grid,
-    bool constrain_displacement, std::size_t max_waters, std::size_t snapshot_buffer_bytes) {
+    bool constrain_displacement, std::size_t max_waters, std::size_t snapshot_buffer_bytes,
+    double max_rotation_deg, double prefill_above_mu) {
     std::filesystem::create_directories(save_path);
 
     auto titration = run_mcswell_gpu_titration(
         receptor_points, insertion_points_xyz, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps,
         save_path, mu_values_f, n_snapshots, seed, dump_debug_pdbs, n_diagnostic_windows,
-        diagnostic_energy_stride, cavity_grid, constrain_displacement, max_waters, snapshot_buffer_bytes);
+        diagnostic_energy_stride, cavity_grid, constrain_displacement, max_waters, snapshot_buffer_bytes,
+        max_rotation_deg, prefill_above_mu);
 
     const auto frames_by_mu = analysis::extract_oxygen_frames(titration.snapshots);
     // The oxygen frames are all the analyses need; free the full waters now.
