@@ -58,7 +58,22 @@ void run_gcmc_titration_launch(
     std::uint32_t n_snapshots,
     std::uint32_t target_n_waters,
 
-    void* d_states
+    void* d_states,
+
+    unsigned long long* d_diag_proposed,
+    unsigned long long* d_diag_accepted,
+    unsigned long long* d_diag_capacity_blocked,
+    unsigned long long* d_diag_n_sum,
+    std::uint32_t* d_diag_n_end,
+    float* d_diag_energy_end,
+    std::uint32_t n_diag_windows,
+    std::uint32_t steps_per_diag_window,
+    std::uint32_t diag_energy_stride,
+
+    const unsigned char* d_cavity_mask,
+    int mask_nx, int mask_ny, int mask_nz,
+    float mask_ox, float mask_oy, float mask_oz,
+    float mask_spacing
 ) {
     auto* states = static_cast<curandStatePhilox4_32_10_t*>(d_states);
     int blocks  = n_mu;
@@ -76,6 +91,19 @@ void run_gcmc_titration_launch(
         equil_steps,
         n_snapshots,
         target_n_waters,
-        states
+        states,
+        d_diag_proposed,
+        d_diag_accepted,
+        d_diag_capacity_blocked,
+        d_diag_n_sum,
+        d_diag_n_end,
+        d_diag_energy_end,
+        n_diag_windows,
+        steps_per_diag_window,
+        diag_energy_stride,
+        d_cavity_mask,
+        mask_nx, mask_ny, mask_nz,
+        mask_ox, mask_oy, mask_oz,
+        mask_spacing
     );
 }

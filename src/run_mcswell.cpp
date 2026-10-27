@@ -21,6 +21,7 @@
 #include <chrono>
 #include <iostream>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -62,7 +63,11 @@ TitrationResult run_mcswell_gpu_titration(
     const std::vector<float>& mu_values,
     std::size_t n_snapshots,
     std::uint64_t seed,
-    bool dump_debug_pdbs
+    bool dump_debug_pdbs,
+    std::size_t n_diagnostic_windows,
+    std::size_t diagnostic_energy_stride,
+    const InsertionGrid* cavity_grid,
+    bool constrain_displacement
 ) {
     // -------------------------
     // Input checks
@@ -125,6 +130,23 @@ TitrationResult run_mcswell_gpu_titration(
     const std::size_t snapshots_len =
         static_cast<std::size_t>(n_mu) * n_snapshots * target_n_waters * WATER_SIZE;
 
+    // Diagnostics windowing. Windows tile the whole run, equilibration
+    // included, so the equilibration/production split stays a host-side slice.
+    // steps_per_window is rounded up so the windows cover every step, then the
+    // window count is recomputed from it; for the usual round step counts this
+    // leaves steps_per_window dividing equilibration_steps, so the split falls
+    // exactly on a window boundary.
+    std::size_t n_diag_windows = 0;
+    std::uint64_t steps_per_diag_window = 0;
+    if (n_diagnostic_windows > 0 && gcmc_steps > 0) {
+        n_diag_windows = std::min(n_diagnostic_windows, gcmc_steps);
+        steps_per_diag_window = (gcmc_steps + n_diag_windows - 1) / n_diag_windows;
+        n_diag_windows = static_cast<std::size_t>(
+            (gcmc_steps + steps_per_diag_window - 1) / steps_per_diag_window);
+    }
+    const std::size_t diag_len = static_cast<std::size_t>(n_mu) * n_diag_windows;
+    const std::size_t diag_len3 = diag_len * mcswell::analysis::N_MOVE_TYPES;
+
     std::vector<std::uint32_t> h_wat_num(static_cast<std::size_t>(n_mu), 0u);
 
     float h_scalars[4] = {
@@ -151,6 +173,9 @@ TitrationResult run_mcswell_gpu_titration(
               << "  equilibration_steps: " << equilibration_steps << "\n"
               << "  n_snapshots: " << n_snapshots << "\n"
               << "  snapshots_len: " << snapshots_len << "\n"
+              << "  diagnostic_windows: " << n_diag_windows
+              << " (" << steps_per_diag_window << " steps each, energy every "
+              << std::max<std::size_t>(diagnostic_energy_stride, 1) << ")\n"
               << "  save_path: " << save_path << "\n";
 
     // -------------------------
@@ -212,6 +237,58 @@ TitrationResult run_mcswell_gpu_titration(
     const std::size_t state_bytes = dummy_rng_state_bytes(); // provided by your launch layer
     cuda_check(cudaMalloc(&d_states, static_cast<std::size_t>(n_mu) * state_bytes), "cudaMalloc d_states");
 
+    // diagnostics (zero; all null when disabled, which the kernel reads as
+    // "don't instrument")
+    unsigned long long* d_diag_proposed = nullptr;
+    unsigned long long* d_diag_accepted = nullptr;
+    unsigned long long* d_diag_capacity_blocked = nullptr;
+    unsigned long long* d_diag_n_sum = nullptr;
+    std::uint32_t* d_diag_n_end = nullptr;
+    float* d_diag_energy_end = nullptr;
+
+    if (diag_len > 0) {
+        const auto alloc_zeroed_u64 = [&](unsigned long long** p, std::size_t n, const char* what) {
+            cuda_check(cudaMalloc(p, n * sizeof(unsigned long long)), what);
+            cuda_check(cudaMemset(*p, 0, n * sizeof(unsigned long long)), what);
+        };
+        alloc_zeroed_u64(&d_diag_proposed, diag_len3, "cudaMalloc d_diag_proposed");
+        alloc_zeroed_u64(&d_diag_accepted, diag_len3, "cudaMalloc d_diag_accepted");
+        alloc_zeroed_u64(&d_diag_capacity_blocked, diag_len, "cudaMalloc d_diag_capacity_blocked");
+        alloc_zeroed_u64(&d_diag_n_sum, diag_len, "cudaMalloc d_diag_n_sum");
+
+        cuda_check(cudaMalloc(&d_diag_n_end, diag_len * sizeof(std::uint32_t)), "cudaMalloc d_diag_n_end");
+        cuda_check(cudaMemset(d_diag_n_end, 0, diag_len * sizeof(std::uint32_t)), "cudaMemset d_diag_n_end");
+        cuda_check(cudaMalloc(&d_diag_energy_end, diag_len * sizeof(float)), "cudaMalloc d_diag_energy_end");
+        cuda_check(cudaMemset(d_diag_energy_end, 0, diag_len * sizeof(float)), "cudaMemset d_diag_energy_end");
+    }
+
+    // cavity mask (optional): one byte per lattice cell, 1 where a kept
+    // insertion point sits. Only uploaded when the displacement constraint is
+    // actually requested.
+    unsigned char* d_cavity_mask = nullptr;
+    int mask_nx = 0, mask_ny = 0, mask_nz = 0;
+    float mask_ox = 0.0f, mask_oy = 0.0f, mask_oz = 0.0f, mask_spacing = spacing;
+    if (constrain_displacement) {
+        if (cavity_grid == nullptr || cavity_grid->mask.empty()) {
+            throw std::invalid_argument(
+                "constrain_displacement requires a cavity grid with a populated mask");
+        }
+        mask_nx = static_cast<int>(cavity_grid->dims[0]);
+        mask_ny = static_cast<int>(cavity_grid->dims[1]);
+        mask_nz = static_cast<int>(cavity_grid->dims[2]);
+        mask_ox = static_cast<float>(cavity_grid->origin[0]);
+        mask_oy = static_cast<float>(cavity_grid->origin[1]);
+        mask_oz = static_cast<float>(cavity_grid->origin[2]);
+        mask_spacing = static_cast<float>(cavity_grid->spacing);
+        const std::size_t mask_bytes = cavity_grid->mask.size() * sizeof(unsigned char);
+        cuda_check(cudaMalloc(&d_cavity_mask, mask_bytes), "cudaMalloc d_cavity_mask");
+        cuda_check(cudaMemcpy(d_cavity_mask, cavity_grid->mask.data(), mask_bytes,
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy cavity_mask");
+        std::cout << "  displacement constrained to the sampled region ("
+                  << mask_nx << "x" << mask_ny << "x" << mask_nz << " lattice)\n";
+    }
+
     // -------------------------
     // Init random seeds (seed_tensor) + kernel launch
     // -------------------------
@@ -236,7 +313,20 @@ TitrationResult run_mcswell_gpu_titration(
         /*equil_steps*/    static_cast<std::uint32_t>(equilibration_steps),
         /*n_snapshots*/    static_cast<std::uint32_t>(n_snapshots),
         /*target_n_waters*/static_cast<std::uint32_t>(target_n_waters),
-        /*rng_states*/     d_states
+        /*rng_states*/     d_states,
+        /*diag_proposed*/  d_diag_proposed,
+        /*diag_accepted*/  d_diag_accepted,
+        /*diag_cap_block*/ d_diag_capacity_blocked,
+        /*diag_n_sum*/     d_diag_n_sum,
+        /*diag_n_end*/     d_diag_n_end,
+        /*diag_energy*/    d_diag_energy_end,
+        /*n_diag_windows*/ static_cast<std::uint32_t>(n_diag_windows),
+        /*steps_per_win*/  static_cast<std::uint32_t>(steps_per_diag_window),
+        /*energy_stride*/  static_cast<std::uint32_t>(std::max<std::size_t>(diagnostic_energy_stride, 1)),
+        /*cavity_mask*/    d_cavity_mask,
+        mask_nx, mask_ny, mask_nz,
+        mask_ox, mask_oy, mask_oz,
+        mask_spacing
     );
     cuda_check(cudaGetLastError(), "run_gcmc_titration_launch");
     cuda_check(cudaDeviceSynchronize(), "run_gcmc_titration sync");
@@ -252,6 +342,41 @@ TitrationResult run_mcswell_gpu_titration(
 
     cuda_check(cudaDeviceSynchronize(), "sync before inspection");
 
+    // -------------------------
+    // Read back diagnostics
+    // -------------------------
+    mcswell::analysis::SamplerDiagnostics diagnostics;
+    if (diag_len > 0) {
+        diagnostics.n_mu = static_cast<std::size_t>(n_mu);
+        diagnostics.n_windows = n_diag_windows;
+        diagnostics.steps_per_window = steps_per_diag_window;
+        diagnostics.total_steps = static_cast<std::uint64_t>(gcmc_steps);
+        diagnostics.equilibration_steps = static_cast<std::uint64_t>(equilibration_steps);
+
+        diagnostics.proposed.resize(diag_len3);
+        diagnostics.accepted.resize(diag_len3);
+        diagnostics.capacity_blocked.resize(diag_len);
+        diagnostics.n_waters_sum.resize(diag_len);
+        diagnostics.n_waters_end.resize(diag_len);
+        diagnostics.energy_end.resize(diag_len);
+
+        const auto copy_back = [&](void* dst, const void* src, std::size_t bytes, const char* what) {
+            cuda_check(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost), what);
+        };
+        copy_back(diagnostics.proposed.data(), d_diag_proposed,
+                  diag_len3 * sizeof(unsigned long long), "cudaMemcpy diag_proposed back");
+        copy_back(diagnostics.accepted.data(), d_diag_accepted,
+                  diag_len3 * sizeof(unsigned long long), "cudaMemcpy diag_accepted back");
+        copy_back(diagnostics.capacity_blocked.data(), d_diag_capacity_blocked,
+                  diag_len * sizeof(unsigned long long), "cudaMemcpy diag_capacity_blocked back");
+        copy_back(diagnostics.n_waters_sum.data(), d_diag_n_sum,
+                  diag_len * sizeof(unsigned long long), "cudaMemcpy diag_n_sum back");
+        copy_back(diagnostics.n_waters_end.data(), d_diag_n_end,
+                  diag_len * sizeof(std::uint32_t), "cudaMemcpy diag_n_end back");
+        copy_back(diagnostics.energy_end.data(), d_diag_energy_end,
+                  diag_len * sizeof(float), "cudaMemcpy diag_energy_end back");
+    }
+
     if (dump_debug_pdbs) {
         mcswell::save_pdbs_by_mu_snapshot(
             h_snapshots,
@@ -265,6 +390,13 @@ TitrationResult run_mcswell_gpu_titration(
     // -------------------------
     // Cleanup
     // -------------------------
+    cudaFree(d_cavity_mask);
+    cudaFree(d_diag_energy_end);
+    cudaFree(d_diag_n_end);
+    cudaFree(d_diag_n_sum);
+    cudaFree(d_diag_capacity_blocked);
+    cudaFree(d_diag_accepted);
+    cudaFree(d_diag_proposed);
     cudaFree(d_states);
     cudaFree(d_snapshots);
     cudaFree(d_mu);
@@ -277,5 +409,6 @@ TitrationResult run_mcswell_gpu_titration(
     TitrationResult result;
     result.snapshots = std::move(h_snapshots);
     result.target_n_waters = static_cast<std::size_t>(target_n_waters);
+    result.diagnostics = std::move(diagnostics);
     return result;
 }

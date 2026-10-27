@@ -262,9 +262,37 @@ Omit this section for receptor-only hydration.
 | `simulation_parameters.n_gcmc_steps` | ✓ | int | ≥ 1 | `50000000` |
 | `simulation_parameters.distance_cutoff` | ✓ | float | > 0 Å | `9.0` |
 | `simulation_parameters.seed` |  | int | GCMC master RNG seed, default `12345` | `20260901` |
+| `simulation_parameters.n_diagnostic_windows` |  | int | ≥ 0, default `1000`; `0` disables | `1000` |
+| `simulation_parameters.diagnostic_energy_stride` |  | int | ≥ 1, default `1` | `20` |
 
-Set `seed` explicitly when running replicates of the same system: left at the
-default, every replicate shares one seed and reproduces the others exactly.
+Set `seed` explicitly when running replicates of the same system, so that the
+Markov chains differ by design rather than by accident.
+
+**`seed` alone does not make a run reproducible end to end.** It fixes the
+GCMC chain, but the receptor prep that feeds it does not: PDBFixer's hydrogen
+placement is unseeded, so two preps of the same input file give bit-identical
+heavy atoms and *different* hydrogen positions (up to ~2.3 Å apart on freely
+rotating groups). Since every receptor atom carries a partial charge the
+sampler scores against, the insertion lattice and the energy landscape differ
+between preps. To reproduce a run exactly, cache the prepped receptor and
+replay it rather than re-prepping.
+
+`n_diagnostic_windows` splits the run into equal windows and records, for each
+(µ, window), the number of insertion/deletion/displacement moves proposed and
+accepted, insertions blocked by the water-buffer capacity, the mean and final
+water count, and the total water-subsystem energy. These go to
+`acceptance_windows.csv` and `acceptance_summary.csv` under `save_path` (see
+[Output](#output)). The counters draw no random numbers, so an instrumented
+run follows exactly the same chain as an uninstrumented one with the same
+seed.
+
+The per-window energy is the only part that costs real work
+(O(`n_waters` × `n_receptor_atoms`) per evaluation).
+`diagnostic_energy_stride` evaluates it every *N*th window instead, which is
+what makes a high-resolution occupancy trace affordable: e.g. 20000 windows
+with `diagnostic_energy_stride = 20` resolves correlation times in steps while
+keeping the energy cost at the 1000-window level. Skipped windows record `nan`
+for the energy.
 
 ### `[mu_range]`
 
@@ -378,6 +406,8 @@ writes only the final result artifacts:
 ```
 <save_path>/
   box.pdb, system_cleaned.pdb        # pre-simulation setup, from OpenMM
+  acceptance_summary.csv             # sampling diagnostics, per (mu, phase)
+  acceptance_windows.csv             # sampling diagnostics, per (mu, window)
   gci/<peak_percentile>_binomial/    # independent-site binomial fit
     sites.csv, sites.pdb, sites_all.csv, titration.csv,
     titration_diagnostics.csv, capacity_diagnostics.csv, gO.dx,
@@ -386,6 +416,53 @@ writes only the final result artifacts:
     sites.csv, sites.pdb, region_titration.csv, local_titration.csv,
     region_gci_pmf.csv, region_gci_model.csv, local_gci_models.csv,
     gci_metadata.json, region_titration.png, local_titration_curves.png
+```
+
+#### Sampling diagnostics
+
+`acceptance_summary.csv` has one row per (µ, phase) with phase in
+`equilibration` / `production` / `total`: moves proposed and accepted for each
+of the three move types, the resulting acceptance rates, insertions refused by
+the water-buffer capacity, and the mean and final water count.
+`acceptance_windows.csv` is the same breakdown resolved per window, plus the
+water-subsystem energy, and is what a convergence analysis reads.
+
+`python/convergence.py` turns that trace into the usual Markov-chain
+diagnostics — statistical inefficiency, integrated autocorrelation time in MC
+steps, effective sample size, a block-averaged standard error on ⟨N⟩, and an
+automatically detected equilibration point (Chodera's reverse-cumulative
+scan). It depends on nothing but numpy:
+
+```python
+from convergence import load_trace, analyse_run
+
+trace = load_trace("<save_path>/acceptance_windows.csv")
+for r in analyse_run(trace):
+    print(r.mu_value, r.mean_n_waters, r.sem_n_waters,
+          r.autocorrelation_steps, r.n_effective_samples)
+```
+
+Because the trace holds window *means*, correlations shorter than one window
+are averaged away before they can be measured; `autocorrelation_resolved`
+flags the µ values where that happened, and the fix is to re-record with more
+windows (and a larger `diagnostic_energy_stride` to keep it cheap).
+`autocorrelation_reliable` flags the opposite problem — a production phase
+spanning too few correlation times for `g` to be estimated at all, in which
+case `second_half_drift_fraction` (which assumes nothing about the correlation
+structure) is the statistic to trust.
+
+Self-checks for these estimators, against series whose statistical
+inefficiency is known analytically:
+
+```bash
+python python/test_convergence.py
+```
+
+The C++ side, including the diagnostics tables, is covered by the analysis
+unit tests:
+
+```bash
+cmake -S . -B build -DMCSWELL_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
 ```
 
 If you want per-snapshot PDBs for visual inspection in PyMOL/VMD (e.g.

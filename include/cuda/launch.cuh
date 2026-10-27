@@ -50,5 +50,25 @@ void run_gcmc_titration_launch(
     std::uint32_t n_snapshots,
     std::uint32_t target_n_waters,
 
-    void* d_states                   // opaque RNG states (n_mu * dummy_rng_state_bytes())
+    void* d_states,                  // opaque RNG states (n_mu * dummy_rng_state_bytes())
+
+    // Per-(mu, window) sampling diagnostics; see
+    // include/analysis/sampler_diagnostics.hpp. Pass n_diag_windows == 0 to
+    // disable. Instrumentation draws no random numbers, so it does not perturb
+    // the chain.
+    unsigned long long* d_diag_proposed,         // [n_mu * n_diag_windows * 3]
+    unsigned long long* d_diag_accepted,         // [n_mu * n_diag_windows * 3]
+    unsigned long long* d_diag_capacity_blocked, // [n_mu * n_diag_windows]
+    unsigned long long* d_diag_n_sum,            // [n_mu * n_diag_windows]
+    std::uint32_t* d_diag_n_end,                 // [n_mu * n_diag_windows]
+    float* d_diag_energy_end,                    // [n_mu * n_diag_windows]
+    std::uint32_t n_diag_windows,
+    std::uint32_t steps_per_diag_window,
+    std::uint32_t diag_energy_stride,
+
+    // Cavity mask constraining displacement; null disables the constraint.
+    const unsigned char* d_cavity_mask,
+    int mask_nx, int mask_ny, int mask_nz,
+    float mask_ox, float mask_oy, float mask_oz,
+    float mask_spacing
 );

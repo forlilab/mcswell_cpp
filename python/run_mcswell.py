@@ -379,6 +379,14 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     # left at the binding's default, replicates of the same system share a seed
     # and reproduce each other bit for bit.
     seed = int(config["simulation_parameters"].get("seed", 12345))
+    # Sampling diagnostics: per-(mu, window) acceptance counts plus occupancy
+    # and energy traces, written to acceptance_windows.csv /
+    # acceptance_summary.csv. Collecting them draws no random numbers, so the
+    # chain is unchanged; 0 switches them off.
+    n_diagnostic_windows = int(
+        config["simulation_parameters"].get("n_diagnostic_windows", 1000))
+    diagnostic_energy_stride = int(
+        config["simulation_parameters"].get("diagnostic_energy_stride", 1))
 
     #mu_range
     mu_values = expand_ranges(config["mu_range"])
@@ -459,6 +467,8 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         random_starts=int(gci_pick("random_starts", 64)),
         fit_seed=int(gci_pick("seed", 20260812)),
         seed=seed,
+        n_diagnostic_windows=n_diagnostic_windows,
+        diagnostic_energy_stride=diagnostic_energy_stride,
     )
 
     exec_time = time.time() - start

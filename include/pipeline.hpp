@@ -18,6 +18,7 @@
 #pragma once
 
 #include "analysis/pipeline_analysis.hpp"
+#include "run_mcswell.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,11 @@ struct PipelineResult {
     double sampler_volume = 0.0;
     std::string binomial_output_dir;
     std::string gci_output_dir;
+
+    // Paths to the sampling-diagnostics tables written under save_path, empty
+    // when diagnostics were switched off.
+    std::string acceptance_windows_csv;
+    std::string acceptance_summary_csv;
 };
 
 // Runs the GCMC titration (run_mcswell_gpu_titration) and, without ever
@@ -49,6 +55,9 @@ PipelineResult run_mcswell_full_pipeline(
     float distance_cutoff, float spacing, std::size_t gcmc_steps, std::size_t equilibration_steps,
     const std::string& save_path, const std::vector<float>& mu_values, std::size_t n_snapshots,
     const analysis::PostAnalysisConfig& analysis_cfg, bool run_binomial = true, bool run_gci = true,
-    std::uint64_t seed = 12345ULL, bool dump_debug_pdbs = false);
+    std::uint64_t seed = 12345ULL, bool dump_debug_pdbs = false,
+    std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
+    std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
+    const InsertionGrid* cavity_grid = nullptr, bool constrain_displacement = false);
 
 } // namespace mcswell

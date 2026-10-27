@@ -38,7 +38,7 @@ static inline double min_dist2_to_atoms(const std::array<double,3>& p,
     return best;
 }
 
-std::vector<double> make_insertion_points_flat(
+InsertionGrid make_insertion_grid(
     const std::vector<Atom>& atoms,
     const GridSpec& grid,
     double max_distance,
@@ -67,8 +67,12 @@ std::vector<double> make_insertion_points_flat(
     const double max2 = max_distance * max_distance;
     const double min2 = min_distance * min_distance;
 
-    std::vector<double> out;
-    out.reserve(static_cast<size_t>(x_points * y_points * z_points) * 3);
+    InsertionGrid out;
+    out.dims = {x_points, y_points, z_points};
+    out.origin = {x_min, y_min, z_min};
+    out.spacing = spacing;
+    out.points_xyz.reserve(static_cast<size_t>(x_points * y_points * z_points) * 3);
+    out.mask.assign(static_cast<size_t>(x_points * y_points * z_points), 0u);
 
     for (std::int64_t i = 0; i < x_points; i++) {
         const double x = x_min + static_cast<double>(i) * spacing;
@@ -83,12 +87,22 @@ std::vector<double> make_insertion_points_flat(
                     if (d2 > max2 || d2 < min2) continue;
                 }
 
-                out.push_back(x);
-                out.push_back(y);
-                out.push_back(z);
+                out.points_xyz.push_back(x);
+                out.points_xyz.push_back(y);
+                out.points_xyz.push_back(z);
+                out.mask[out.index(i, j, k)] = 1u;
             }
         }
     }
 
     return out;
+}
+
+std::vector<double> make_insertion_points_flat(
+    const std::vector<Atom>& atoms,
+    const GridSpec& grid,
+    double max_distance,
+    double min_distance
+) {
+    return make_insertion_grid(atoms, grid, max_distance, min_distance).points_xyz;
 }

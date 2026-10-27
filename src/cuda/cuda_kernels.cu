@@ -67,7 +67,20 @@ __global__ void run_gcmc_titration_kernel(
     std::uint32_t equil_steps,
     std::uint32_t n_snapshots,
     std::uint32_t target_n_waters,
-    curandStatePhilox4_32_10_t* states
+    curandStatePhilox4_32_10_t* states,
+    unsigned long long* d_diag_proposed,
+    unsigned long long* d_diag_accepted,
+    unsigned long long* d_diag_capacity_blocked,
+    unsigned long long* d_diag_n_sum,
+    std::uint32_t* d_diag_n_end,
+    float* d_diag_energy_end,
+    std::uint32_t n_diag_windows,
+    std::uint32_t steps_per_diag_window,
+    std::uint32_t diag_energy_stride,
+    const unsigned char* d_cavity_mask,
+    int mask_nx, int mask_ny, int mask_nz,
+    float mask_ox, float mask_oy, float mask_oz,
+    float mask_spacing
 ){
     const float* __restrict__ boundaries_xyz   = d_boundaries_xyz;
     const uint32_t            boundaries_max   = (uint32_t)n_points;
@@ -108,6 +121,11 @@ __global__ void run_gcmc_titration_kernel(
     // ------------ shared state ------------
     __shared__ float sh_trial[WATER_SIZE];
     __shared__ float sh_old[WATER_SIZE];
+    // Staging buffer for the diagnostics energy sweep. eval_energy_with_waters
+    // marks both the water buffer and the target water __restrict__, so the
+    // target must not alias the buffer -- passing &water_atoms[k] directly is
+    // undefined behaviour and in practice miscompiles into garbage energies.
+    __shared__ float sh_diag[WATER_SIZE];
     __shared__ float sh_partials[512]; // blockDim.x must be 512
     __shared__ uint32_t sh_active;
     __shared__ uint32_t sh_move_type;
@@ -123,6 +141,17 @@ __global__ void run_gcmc_titration_kernel(
         sh_snap_id = 0;
     }
     __syncthreads();
+
+    // ------------ sampling diagnostics ------------
+    // Per-window counters live in thread 0's registers and are flushed to
+    // global memory at each window boundary. None of this draws from `st`, so
+    // the Markov chain is bit-for-bit identical with diagnostics on or off.
+    const bool diag_on = (n_diag_windows > 0u) && (steps_per_diag_window > 0u) &&
+                         (d_diag_proposed != nullptr);
+    unsigned long long w_proposed[3] = {0ull, 0ull, 0ull};
+    unsigned long long w_accepted[3] = {0ull, 0ull, 0ull};
+    unsigned long long w_capacity_blocked = 0ull;
+    unsigned long long w_n_sum = 0ull;
 
     float trial_water[WATER_SIZE];
 
@@ -187,8 +216,12 @@ __global__ void run_gcmc_titration_kernel(
 
                 const bool ok = propose_perturbation_cloud(
                     oldw,
-                    boundaries_xyz, boundaries_max,
+                    boundaries_max,
                     &st,
+                    d_cavity_mask,
+                    mask_nx, mask_ny, mask_nz,
+                    mask_ox, mask_oy, mask_oz,
+                    mask_spacing,
                     dx, dy, dz,
                     ax, ay, az,
                     angle_rad,
@@ -238,6 +271,8 @@ __global__ void run_gcmc_titration_kernel(
             uint32_t active_local = sh_active;
             const float u = sh_u;
 
+            if (diag_on) w_proposed[move_type] += 1ull;
+
             if (move_type == 0) {
                 const float new_energy = e_rec_new + e_wat_new;
                 const float delta_e = new_energy;
@@ -250,6 +285,12 @@ __global__ void run_gcmc_titration_kernel(
                     copy_water_to_array(trial_water, water_atoms, dst);
                     active_local += 1u;
                     num_waters[mu_id] += 1u;
+                    if (diag_on) w_accepted[0] += 1ull;
+                } else if (diag_on && u < p_acc) {
+                    // Metropolis said yes, the fixed-size water buffer said no.
+                    // Tracked apart from genuine rejections: a run where this is
+                    // not negligible is box-limited, not badly converged.
+                    w_capacity_blocked += 1ull;
                 }
 
             } else if (move_type == 1 && active_local > 0) {
@@ -269,6 +310,7 @@ __global__ void run_gcmc_titration_kernel(
                     clear_water_in_array(water_atoms, last);
                     active_local -= 1u;
                     num_waters[mu_id] -= 1u;
+                    if (diag_on) w_accepted[1] += 1ull;
                 }
 
             } else if (move_type == 2 && active_local > 0) {
@@ -282,10 +324,12 @@ __global__ void run_gcmc_titration_kernel(
                     const uint32_t tgt = sh_tgt_idx;
                     const uint32_t dst = mu_waters_base + tgt * (uint32_t)WATER_SIZE;
                     copy_water_to_array(trial_water, water_atoms, dst);
+                    if (diag_on) w_accepted[2] += 1ull;
                 }
             }
 
             sh_active = active_local;
+            if (diag_on) w_n_sum += (unsigned long long)active_local;
 
             // `step >= equil`, not `>`: with a strict `>` the first snapshot
             // offset is 1 instead of 0, the offsets 0, S, ..., (n-1)S no longer
@@ -320,6 +364,73 @@ __global__ void run_gcmc_titration_kernel(
         }
 
         __syncthreads();
+
+        // ------------ diagnostics flush ------------
+        // Block-uniform: `step`, `steps_per_diag_window` and `steps` are the
+        // same for every thread, so the whole block enters together and the
+        // energy reductions below (which carry their own __syncthreads) are
+        // safe.
+        if (diag_on) {
+            const bool flush = (((step + 1u) % steps_per_diag_window) == 0u) || ((step + 1u) == steps);
+            if (flush) {
+                uint32_t w_idx = step / steps_per_diag_window;
+                if (w_idx >= n_diag_windows) w_idx = n_diag_windows - 1u;
+
+                // Total interaction energy of the water subsystem at the end of
+                // the window: every water against the receptor, plus every
+                // water-water pair once (each pair is visited twice by the loop,
+                // hence the 1/2). The constant receptor-receptor term is left
+                // out, so this is a relative trace, not an absolute energy.
+                //
+                // This is the only part of the instrumentation that costs real
+                // work -- O(n_waters * n_receptor_atoms) per evaluation -- so
+                // diag_energy_stride decouples it from the counter windows. A
+                // fine-grained occupancy trace (short windows, for measuring
+                // correlation times in steps) can then skip most of them; the
+                // skipped windows get NaN rather than a stale value.
+                const uint32_t n_active = sh_active;
+                const bool want_energy = (diag_energy_stride <= 1u) ||
+                                         ((w_idx % diag_energy_stride) == 0u) ||
+                                         ((step + 1u) == steps);
+                float e_total = CUDART_NAN_F;
+                if (want_energy) {
+                    e_total = 0.0f;
+                    for (uint32_t k = 0; k < n_active; ++k) {
+                        const uint32_t src = mu_waters_base + k * (uint32_t)WATER_SIZE;
+                        if (tid < WATER_SIZE) sh_diag[tid] = water_atoms[src + tid];
+                        __syncthreads();
+
+                        e_total += eval_energy_with_receptor(
+                            receptor_atoms, sh_diag, n_receptor_atoms_u, sh_partials
+                        );
+                        e_total += 0.5f * eval_energy_with_waters(
+                            water_atoms, sh_diag, mu_id, n_active,
+                            target_n_waters_local, (int)k, sh_partials
+                        );
+                    }
+                }
+
+                if (tid == 0) {
+                    const uint32_t flat = mu_id * n_diag_windows + w_idx;
+                    const uint32_t flat3 = flat * 3u;
+#pragma unroll
+                    for (int m = 0; m < 3; ++m) {
+                        d_diag_proposed[flat3 + m] = w_proposed[m];
+                        d_diag_accepted[flat3 + m] = w_accepted[m];
+                        w_proposed[m] = 0ull;
+                        w_accepted[m] = 0ull;
+                    }
+                    d_diag_capacity_blocked[flat] = w_capacity_blocked;
+                    d_diag_n_sum[flat] = w_n_sum;
+                    d_diag_n_end[flat] = n_active;
+                    d_diag_energy_end[flat] = e_total;
+                    w_capacity_blocked = 0ull;
+                    w_n_sum = 0ull;
+                }
+
+                __syncthreads();
+            }
+        }
     }
 
     if (tid == 0) {

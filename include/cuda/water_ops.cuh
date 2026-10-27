@@ -77,21 +77,64 @@ void propose_insertion_xyz(float x, float y, float z, float resnum_f, float w[WA
     w[H2X]+=x; w[H2Y]+=y; w[H2Z]+=z; w[H2RES]=resnum_f;
 }
 
+// Is (x,y,z) inside the sampled region?
+//
+// The region is the union of voxels around the kept lattice points, and its
+// volume (n_points * spacing^3) is what enters the Adams parameter -- so voxel
+// membership is the criterion that keeps the volume bookkeeping consistent.
+// The lattice is regular, so the containing voxel is an index computation and
+// the lookup is O(1); searching the point list would be O(n_points).
+__device__ __forceinline__
+bool inside_cavity(
+    float x, float y, float z,
+    const unsigned char* __restrict__ mask,
+    int nx, int ny, int nz,
+    float ox, float oy, float oz,
+    float spacing
+){
+    if (mask == nullptr) return true;          // mask absent: unconstrained
+    // rintf rather than __float2int_rn: this header is pulled into host
+    // translation units via snapshots_io.hpp -> water_model.cuh, where the
+    // CUDA intrinsics are not declared.
+    const int i = (int)rintf((x - ox) / spacing);
+    const int j = (int)rintf((y - oy) / spacing);
+    const int k = (int)rintf((z - oz) / spacing);
+    if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return false;
+    return mask[((long long)i * ny + j) * nz + k] != 0u;
+}
+
 // Displacement proposal:
 // - translate O by (dx,dy,dz)
 // - rotate Hs around new O pivot by Rodrigues axis+angle
-// - additionally enforce that new O is close to allowed insertion cloud point (nearest within radius)
-//   (this is how you can keep the “cloud” constraint for displacement too)
+// - reject outright if the new O leaves the sampled region
+//
+// That last step is what makes insertion and deletion reciprocal. Insertion
+// can only create a water inside the region, so without the constraint a water
+// could be displaced somewhere it could never have been inserted and then be
+// deleted from there -- a move whose reverse has zero proposal probability.
+// The proposal stays symmetric within the region, so rejecting excursions out
+// of it preserves detailed balance.
 __device__ __forceinline__
 bool propose_perturbation_cloud(
     const float oldw[WATER_SIZE],
-    const float* __restrict__ boundary_xyz, // [boundaries_max*3]
     uint32_t boundaries_max,
     curandStatePhilox4_32_10_t* st,
+    const unsigned char* __restrict__ cavity_mask,
+    int mask_nx, int mask_ny, int mask_nz,
+    float mask_ox, float mask_oy, float mask_oz,
+    float mask_spacing,
     float dx, float dy, float dz,
     float ax, float ay, float az, float angle_rad,
     float neww[WATER_SIZE]
 ){
+    // This draw is not used. It is kept deliberately: the original
+    // implementation drew a random cloud point here (to test a constraint it
+    // then discarded), and removing the draw would shift the Philox stream for
+    // every subsequent step, so runs would no longer reproduce published
+    // trajectories at the same seed. Keeping it costs one RNG call per
+    // displacement proposal and keeps seeds comparable across versions.
+    (void)rand_int(st, (int)boundaries_max);
+
 #pragma unroll
     for (int i=0;i<WATER_SIZE;i++) neww[i]=oldw[i];
 
@@ -99,16 +142,11 @@ bool propose_perturbation_cloud(
     const float new_oy = oldw[OY] + dy;
     const float new_oz = oldw[OZ] + dz;
 
-    const uint32_t idx = (uint32_t)rand_int(st, (int)boundaries_max);
-    const uint32_t bi = idx * 3;
-    const float bx = boundary_xyz[bi+0];
-    const float by = boundary_xyz[bi+1];
-    const float bz = boundary_xyz[bi+2];
-
-    const float ddx = new_ox - bx;
-    const float ddy = new_oy - by;
-    const float ddz = new_oz - bz;
-    const float d2 = ddx*ddx + ddy*ddy + ddz*ddz;
+    if (!inside_cavity(new_ox, new_oy, new_oz, cavity_mask,
+                       mask_nx, mask_ny, mask_nz,
+                       mask_ox, mask_oy, mask_oz, mask_spacing)) {
+        return false;
+    }
 
     float3u h1 = make_float3u(neww[H1X] + dx, neww[H1Y] + dy, neww[H1Z] + dz);
     float3u h2 = make_float3u(neww[H2X] + dx, neww[H2Y] + dy, neww[H2Z] + dz);
