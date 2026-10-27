@@ -22,13 +22,12 @@
 #include <string>
 #include <vector>
 
+#include "water_snapshots.hpp"
+
 namespace mcswell::analysis {
 
-// Oxygen coordinates of every active water in one GCMC snapshot, in the
-// order they appear in the GPU water buffer. An "inactive" water slot (an
-// (x,y,z) == (0,0,0) never-written slot, the same convention the GPU kernel
-// zero-initializes the water buffer with) is skipped, exactly like the old
-// PDB-based pipeline skipped it when writing snap_#####.pdb.
+// Oxygen coordinates of every water in one GCMC snapshot, in the order they
+// appear in the GPU water buffer.
 struct WaterFrame {
     std::vector<std::array<double, 3>> oxygens;
 };
@@ -38,19 +37,10 @@ struct MuWindowFrames {
     std::vector<WaterFrame> frames; // size == n_snapshots
 };
 
-// Extracts oxygen-only point clouds directly from the flat host snapshot
-// buffer produced by run_mcswell_gpu_titration(), replacing the old
-// write-PDB-then-reparse-PDB round trip. `snapshots_flat` must have length
-// n_mu * n_snapshots * max_n_waters * WATER_SIZE, laid out exactly as
-// snapshots_io.hpp::reconstruct_snapshots_by_mu expects (mu-major, then
-// snapshot, then water, using the OX/OY/OZ/... offsets from
-// include/cuda/consts.cuh).
-std::vector<MuWindowFrames> extract_oxygen_frames(
-    const std::vector<float>& snapshots_flat,
-    std::size_t n_mu,
-    std::size_t n_snapshots,
-    std::size_t max_n_waters
-);
+// Extracts oxygen-only point clouds directly from the snapshots produced by
+// run_mcswell_gpu_titration(), replacing the old write-PDB-then-reparse-PDB
+// round trip.
+std::vector<MuWindowFrames> extract_oxygen_frames(const WaterSnapshots& snapshots);
 
 // Per-mu-window water-count statistics and the capacity-safety verdict.
 // Ports scan_capacity_and_collect_density_points() from both
@@ -79,7 +69,12 @@ struct CapacityScanResult {
     std::vector<bool> valid_mask;
 };
 
-// A window "triggers" capacity truncation if either:
+// `water_capacity` is the hard limit on the water count the sampler enforced
+// (its max_waters), or 0 if it had none. With no limit nothing can be
+// truncated, so every window is valid ("no_capacity_limit") and the
+// capacity fractions are NaN.
+//
+// Otherwise a window "triggers" capacity truncation if either:
 //   1) more than `max_capacity_hit_fraction` of its frames have a water
 //      count >= `water_capacity`, or
 //   2) its mean water count is >= `max_mean_capacity_fraction * water_capacity`.

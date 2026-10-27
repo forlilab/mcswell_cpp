@@ -99,9 +99,9 @@ InsertionGrid rebuild_cavity_grid(
 }
 
 // Runs the GCMC titration only, with no post-simulation analysis -- kept
-// for debugging/advanced use. Returns the full in-memory snapshot buffer
-// (and the water-buffer sizing needed to index into it) rather than
-// writing anything to disk, unless dump_debug_pdbs is requested.
+// for debugging/advanced use. Returns every snapshot in memory, in the
+// compact WaterSnapshots layout, rather than writing anything to disk,
+// unless dump_debug_pdbs is requested.
 py::dict run_mcswell_py(
     const std::vector<Atom>& receptor_points,
     py::array_t<float, py::array::c_style | py::array::forcecast> boundaries_xyz, // (N,3) or (3N,)
@@ -119,7 +119,9 @@ py::dict run_mcswell_py(
     bool constrain_displacement = false,
     std::array<double, 3> box_center = {0.0, 0.0, 0.0},
     std::array<double, 3> box_halfsize = {0.0, 0.0, 0.0},
-    double min_distance = 1.5
+    double min_distance = 1.5,
+    std::size_t max_waters = 0,
+    std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES
 ) {
     const std::size_t n_points = n_points_from_boundaries(boundaries_xyz);
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
@@ -140,15 +142,20 @@ py::dict run_mcswell_py(
     const auto result = run_mcswell_gpu_titration(
         receptor_points, ptr, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps, save_path,
         mu_values, n_snapshots, seed, dump_debug_pdbs, n_diagnostic_windows, diagnostic_energy_stride,
-        constrain_displacement ? &cavity : nullptr, constrain_displacement
+        constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters, snapshot_buffer_bytes
     );
 
-    py::array_t<float> snapshots(static_cast<py::ssize_t>(result.snapshots.size()));
-    std::memcpy(snapshots.mutable_data(), result.snapshots.data(), result.snapshots.size() * sizeof(float));
+    const auto& snaps = result.snapshots;
+    py::array_t<std::uint64_t> offsets(static_cast<py::ssize_t>(snaps.offsets.size()));
+    std::memcpy(offsets.mutable_data(), snaps.offsets.data(), snaps.offsets.size() * sizeof(std::uint64_t));
+    py::array_t<float> waters({static_cast<py::ssize_t>(snaps.offsets.back()), static_cast<py::ssize_t>(WATER_SIZE)});
+    std::memcpy(waters.mutable_data(), snaps.waters.data(), snaps.waters.size() * sizeof(float));
 
     py::dict out;
-    out["snapshots"] = snapshots;
-    out["target_n_waters"] = result.target_n_waters;
+    out["offsets"] = offsets;
+    out["waters"] = waters;
+    out["max_waters"] = result.max_waters;
+    out["water_capacity"] = result.water_capacity;
     out["n_mu"] = mu_values.size();
     out["n_snapshots"] = n_snapshots;
     out["diagnostics"] = diagnostics_to_dict(result.diagnostics);
@@ -179,7 +186,6 @@ py::dict run_mcswell_and_analyze_py(
     double peak_percentile = 90.0,
     double peak_merge_cutoff = 1.4,
     bool capacity_filter = true,
-    double bulk_water_density = 0.0334,
     double max_capacity_hit_fraction = 0.01,
     double max_mean_capacity_fraction = 0.90,
     double assignment_cutoff = 2.4,
@@ -194,7 +200,8 @@ py::dict run_mcswell_and_analyze_py(
     std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
     std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
     bool constrain_displacement = false,
-    double min_distance = 1.5
+    double min_distance = 1.5,
+    std::size_t max_waters = 0
 ) {
     const std::size_t n_points = n_points_from_boundaries(boundaries_xyz);
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
@@ -221,7 +228,6 @@ py::dict run_mcswell_and_analyze_py(
     cfg.peak_percentile = peak_percentile;
     cfg.peak_merge_cutoff = peak_merge_cutoff;
     cfg.capacity_filter = capacity_filter;
-    cfg.bulk_water_density = bulk_water_density;
     cfg.max_capacity_hit_fraction = max_capacity_hit_fraction;
     cfg.max_mean_capacity_fraction = max_mean_capacity_fraction;
     cfg.assignment_cutoff = assignment_cutoff;
@@ -235,12 +241,14 @@ py::dict run_mcswell_and_analyze_py(
     const auto result = mcswell::run_mcswell_full_pipeline(
         receptor_points, ptr, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps, save_path,
         mu_values, n_snapshots, cfg, run_binomial, run_gci, seed, dump_debug_pdbs, n_diagnostic_windows,
-        diagnostic_energy_stride, constrain_displacement ? &cavity : nullptr, constrain_displacement
+        diagnostic_energy_stride, constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters
     );
 
     py::dict out;
     out["n_insertion_points"] = result.n_insertion_points;
     out["sampler_volume"] = result.sampler_volume;
+    out["max_waters"] = result.max_waters;
+    out["water_capacity"] = result.water_capacity;
     out["binomial_output_dir"] = result.binomial_output_dir;
     out["gci_output_dir"] = result.gci_output_dir;
     out["acceptance_windows_csv"] = result.acceptance_windows_csv;
@@ -341,10 +349,15 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("box_center") = std::array<double, 3>{0.0, 0.0, 0.0},
       py::arg("box_halfsize") = std::array<double, 3>{0.0, 0.0, 0.0},
       py::arg("min_distance") = 1.5,
+      py::arg("max_waters") = 0,
+      py::arg("snapshot_buffer_bytes") = DEFAULT_SNAPSHOT_BUFFER_BYTES,
       "Run the GCMC titration only (no post-simulation analysis). Returns "
-      "a dict with the full in-memory snapshot buffer ('snapshots'), plus "
-      "the sizing needed to index into it ('target_n_waters', 'n_mu', "
-      "'n_snapshots'), and the per-(mu, window) sampling trace "
+      "a dict with every snapshot in memory as 'waters' (an (N, 12) float32 "
+      "array) and 'offsets' (n_mu * n_snapshots + 1 entries: frame "
+      "mu * n_snapshots + snap holds waters[offsets[f]:offsets[f+1]]), plus "
+      "'n_mu', 'n_snapshots', 'max_waters' (the enforced limit, 0 = none) and "
+      "'water_capacity' (the size the water buffer grew to), and the per-(mu, "
+      "window) sampling trace "
       "('diagnostics': per-move proposed/accepted counts, capacity-blocked "
       "insertions, mean and final water counts, and the water-subsystem "
       "energy, as (n_mu, n_windows[, 3]) arrays). Set n_diagnostic_windows=0 "
@@ -375,7 +388,6 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("peak_percentile") = 90.0,
       py::arg("peak_merge_cutoff") = 1.4,
       py::arg("capacity_filter") = true,
-      py::arg("bulk_water_density") = 0.0334,
       py::arg("max_capacity_hit_fraction") = 0.01,
       py::arg("max_mean_capacity_fraction") = 0.90,
       py::arg("assignment_cutoff") = 2.4,
@@ -391,6 +403,7 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("diagnostic_energy_stride") = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
       py::arg("constrain_displacement") = false,
       py::arg("min_distance") = 1.5,
+      py::arg("max_waters") = 0,
       "Run the GCMC titration and the requested post-simulation "
       "analyses (binomial site-occupancy fit and/or ProtoMS-style GCI) "
       "entirely in memory: no per-snapshot PDB is written to disk. "
@@ -399,11 +412,15 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       "the sampling-diagnostics tables acceptance_windows.csv and "
       "acceptance_summary.csv under save_path itself "
       "(n_diagnostic_windows=0 disables those). "
-      "Returns a dict with n_insertion_points, sampler_volume, "
-      "binomial_output_dir, gci_output_dir, acceptance_windows_csv, "
-      "acceptance_summary_csv.\n\n"
+      "Returns a dict with n_insertion_points, sampler_volume, max_waters, "
+      "water_capacity, binomial_output_dir, gci_output_dir, "
+      "acceptance_windows_csv, acceptance_summary_csv.\n\n"
       "constrain_displacement=True rejects displacement moves that would "
       "carry a water out of the sampled region, so insertion and deletion "
       "act on the same region (min_distance must match the value used to "
-      "build the boundaries). Default False preserves historical behaviour.");
+      "build the boundaries). Default False preserves historical behaviour.\n\n"
+      "The number of waters per window is unlimited by default: the water "
+      "buffer grows on demand. max_waters > 0 sets a hard limit (insertions "
+      "beyond it are refused and counted as capacity-blocked), and the "
+      "capacity filter then excludes windows that run into it.");
 }

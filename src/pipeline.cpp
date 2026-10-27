@@ -32,17 +32,20 @@ PipelineResult run_mcswell_full_pipeline(
     const analysis::PostAnalysisConfig& analysis_cfg, bool run_binomial, bool run_gci, std::uint64_t seed,
     bool dump_debug_pdbs, std::size_t n_diagnostic_windows,
     std::size_t diagnostic_energy_stride, const InsertionGrid* cavity_grid,
-    bool constrain_displacement) {
+    bool constrain_displacement, std::size_t max_waters, std::size_t snapshot_buffer_bytes) {
     std::filesystem::create_directories(save_path);
 
-    const auto titration = run_mcswell_gpu_titration(
+    auto titration = run_mcswell_gpu_titration(
         receptor_points, insertion_points_xyz, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps,
         save_path, mu_values_f, n_snapshots, seed, dump_debug_pdbs, n_diagnostic_windows,
-        diagnostic_energy_stride, cavity_grid, constrain_displacement);
+        diagnostic_energy_stride, cavity_grid, constrain_displacement, max_waters, snapshot_buffer_bytes);
 
-    const std::size_t n_mu = mu_values_f.size();
-    const auto frames_by_mu =
-        analysis::extract_oxygen_frames(titration.snapshots, n_mu, n_snapshots, titration.target_n_waters);
+    const auto frames_by_mu = analysis::extract_oxygen_frames(titration.snapshots);
+    // The oxygen frames are all the analyses need; free the full waters now.
+    titration.snapshots = WaterSnapshots{};
+
+    analysis::PostAnalysisConfig cfg = analysis_cfg;
+    cfg.water_capacity = titration.max_waters;
 
     const std::vector<double> mu_values(mu_values_f.begin(), mu_values_f.end());
 
@@ -52,6 +55,8 @@ PipelineResult run_mcswell_full_pipeline(
     PipelineResult result;
     result.n_insertion_points = n_points;
     result.sampler_volume = sampler_volume;
+    result.max_waters = titration.max_waters;
+    result.water_capacity = titration.water_capacity;
 
     // Written next to the free-energy artifacts rather than inside either
     // analysis's directory: the acceptance/occupancy trace describes the
@@ -69,11 +74,11 @@ PipelineResult run_mcswell_full_pipeline(
 
     if (run_binomial) {
         result.binomial_output_dir = analysis::run_binomial_analysis(
-            frames_by_mu, mu_values, analysis_cfg, n_points, sampler_volume, save_path);
+            frames_by_mu, mu_values, cfg, n_points, sampler_volume, save_path);
     }
     if (run_gci) {
         result.gci_output_dir =
-            analysis::run_gci_analysis(frames_by_mu, mu_values, analysis_cfg, n_points, sampler_volume, save_path);
+            analysis::run_gci_analysis(frames_by_mu, mu_values, cfg, n_points, sampler_volume, save_path);
     }
 
     return result;

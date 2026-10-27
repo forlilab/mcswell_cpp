@@ -65,11 +65,12 @@ struct SamplerDiagnostics {
     // Indexed [mu * n_windows + w].
     //
     // capacity_blocked counts insertion proposals that passed the Metropolis
-    // test but were refused anyway because the chain had already reached
-    // target_n_waters (the fixed-size water buffer). These are *not* Metropolis
-    // rejections: they are a hard wall, and a run in which they are not
-    // negligible is one whose box is too small for the chemical potential being
-    // sampled, independently of how well the chain is converged.
+    // test but were refused anyway because the chain had already reached the
+    // run's max_waters limit. The water buffer otherwise grows on demand, so
+    // this is always zero for a run without max_waters. These are *not*
+    // Metropolis rejections: they are a hard wall, and a run in which they are
+    // not negligible is one whose limit is too low for the chemical potential
+    // being sampled, independently of how well the chain is converged.
     std::vector<std::uint64_t> capacity_blocked;
 
     // Sum of the water count over the steps of the window; divide by the

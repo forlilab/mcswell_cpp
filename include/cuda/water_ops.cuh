@@ -29,25 +29,25 @@
 
 
 __device__ __forceinline__
-void load_water_from_array(const float* __restrict__ src, uint32_t base, float w[WATER_SIZE]) {
+void load_water_from_array(const float* __restrict__ src, size_t base, float w[WATER_SIZE]) {
 #pragma unroll
     for (int i=0;i<WATER_SIZE;i++) w[i] = src[base + i];
 }
 
 __device__ __forceinline__
-void move_water_in_array(float* buf, uint32_t src, uint32_t dst) {
+void move_water_in_array(float* buf, size_t src, size_t dst) {
 #pragma unroll
   for (int i = 0; i < 12; ++i) buf[dst + i] = buf[src + i];
 }
 
 __device__ __forceinline__
-void copy_water_to_array(const float* src12, float* buf, uint32_t dst) {
+void copy_water_to_array(const float* src12, float* buf, size_t dst) {
 #pragma unroll
   for (int i = 0; i < 12; ++i) buf[dst + i] = src12[i];
 }
 
 __device__ __forceinline__
-void clear_water_in_array(float* buf, uint32_t base) {
+void clear_water_in_array(float* buf, size_t base) {
 #pragma unroll
   for (int i = 0; i < 12; ++i) buf[base + i] = 0.0f;
 }

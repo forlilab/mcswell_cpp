@@ -20,6 +20,8 @@
 #pragma once
 #include <cstdint>
 
+#include "cuda/titration_state.cuh"
+
 #ifdef __CUDACC__
 // Only visible to NVCC compilation units (.cu)
 #include <curand_kernel.h>
@@ -32,20 +34,26 @@ __global__ void init_rng(curandStatePhilox4_32_10_t* states, std::uint64_t seed,
 // Pass n_diag_windows == 0 (or null pointers) to switch the instrumentation
 // off. Collecting it consumes no random numbers, so an instrumented run
 // reproduces an uninstrumented one with the same seed exactly.
+//
+// The kernel is resumable: see include/cuda/titration_state.cuh and the
+// comment on its definition.
 __global__ void run_gcmc_titration_kernel(
     const float* d_boundaries_xyz, int n_points,
     const float* d_receptor, int n_receptor_atoms,
     float* d_waters,
     std::uint32_t* d_wat_num,
     const float* d_scalars,
-    float* d_snapshots,
     const float* d_mu_values, int n_mu,
     float distance_cutoff,
     std::uint32_t gcmc_steps,
+    std::uint32_t step_end,                      // run no further than this step in this launch
     std::uint32_t equil_steps,
     std::uint32_t n_snapshots,
-    std::uint32_t target_n_waters,
+    std::uint32_t water_capacity,                // per-mu stride of d_waters, in waters
+    bool grow_on_full,                           // stop at water_capacity instead of refusing insertions
     curandStatePhilox4_32_10_t* states,
+    TitrationCarry carry,
+    SnapshotArena arena,
     unsigned long long* d_diag_proposed,         // [n_mu * n_diag_windows * 3]
     unsigned long long* d_diag_accepted,         // [n_mu * n_diag_windows * 3]
     unsigned long long* d_diag_capacity_blocked, // [n_mu * n_diag_windows]

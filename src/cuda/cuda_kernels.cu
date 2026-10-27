@@ -45,29 +45,39 @@ __global__ void init_rng(curandStatePhilox4_32_10_t* states, std::uint64_t seed,
 // - gridDim.x == n_mu (one sim per block)
 // - blockDim.x == 512 (power-of-two for reduction)
 // - boundaries_xyz is a cloud: [boundaries_max*3] (x,y,z per point)
-// - water_atoms is compact water-major: [n_mu * target_n_waters * 12]
+// - water_atoms is compact water-major: [n_mu * water_capacity * 12]
 // - rng_states has one Philox state per mu: [n_mu]
 //
 // scalars layout (same as your Rust):
 //   scalars[0] = last_resnum (unused here, kept for parity)
 //   scalars[1] = volume
 //   scalars[2] = steps
-//   scalars[3] = target_n_waters
+//   scalars[3] = initial water capacity (unused here, kept for parity)
 //
+// Each block resumes at carry.step[mu] and runs up to step_end (the host runs
+// the titration in chunks), or until it has to stop for the host (see
+// include/cuda/titration_state.cuh): with
+// grow_on_full set, reaching water_capacity stops the block so the buffer can
+// be grown, instead of refusing the insertion. Stopping happens before the
+// step draws anything from the RNG, so a run that is stopped and resumed any
+// number of times follows exactly the same chain as one uninterrupted launch.
 __global__ void run_gcmc_titration_kernel(
     const float* d_boundaries_xyz, int n_points,
     const float* d_receptor, int n_receptor_atoms,
     float* d_waters,
     std::uint32_t* d_wat_num,
     const float* d_scalars,
-    float* d_snapshots,
     const float* d_mu_values, int n_mu,
     float distance_cutoff,
     std::uint32_t gcmc_steps,
+    std::uint32_t step_end,
     std::uint32_t equil_steps,
     std::uint32_t n_snapshots,
-    std::uint32_t target_n_waters,
+    std::uint32_t water_capacity,
+    bool grow_on_full,
     curandStatePhilox4_32_10_t* states,
+    TitrationCarry carry,
+    SnapshotArena arena,
     unsigned long long* d_diag_proposed,
     unsigned long long* d_diag_accepted,
     unsigned long long* d_diag_capacity_blocked,
@@ -93,7 +103,6 @@ __global__ void run_gcmc_titration_kernel(
     uint32_t* __restrict__ num_waters          = d_wat_num;
 
     const float* __restrict__ scalars          = d_scalars;
-    float* __restrict__ snapshots              = d_snapshots;
     const float* __restrict__ mu_array         = d_mu_values;
 
     (void)n_mu;             // one block per mu, so not needed inside
@@ -106,7 +115,7 @@ __global__ void run_gcmc_titration_kernel(
     const uint32_t last_resnum      = (uint32_t)scalars[0]; (void)last_resnum;
     const float    volume           = scalars[1];
     const uint32_t steps            = (uint32_t)gcmc_steps;
-    const uint32_t target_n_waters_local = (uint32_t)target_n_waters;
+    const uint32_t water_capacity_local = (uint32_t)water_capacity;
     const uint32_t n_moves          = 3;
     const float chemical_potential = mu_array[mu_id];
     const uint32_t equil_steps_local = (uint32_t)equil_steps;
@@ -116,7 +125,11 @@ __global__ void run_gcmc_titration_kernel(
     const float volume_var = volume / (float)STANDARD_VOLUME;
     const float B = chemical_potential * (float)BETA + logf(volume_var);
     // water buffer base (float index) for this mu
-    const uint32_t mu_waters_base = mu_id * target_n_waters_local * (uint32_t)WATER_SIZE;
+    const size_t mu_waters_base = (size_t)mu_id * water_capacity_local * (size_t)WATER_SIZE;
+    // this mu's slice of the snapshot staging buffer
+    float* __restrict__ snap_out = arena.data + (size_t)mu_id * arena.floats_per_mu;
+    const uint32_t step_begin = carry.step[mu_id];
+    const uint32_t step_stop  = (step_end < steps) ? step_end : steps;
 
     // ------------ shared state ------------
     __shared__ float sh_trial[WATER_SIZE];
@@ -132,13 +145,17 @@ __global__ void run_gcmc_titration_kernel(
     __shared__ uint32_t sh_tgt_idx;
     __shared__ float    sh_u;
     __shared__ uint32_t sh_snap_id;
+    __shared__ uint32_t sh_exit;
 
     // ------------ RNG state (thread 0) ------------
     curandStatePhilox4_32_10_t st;
+    unsigned long long snap_used = 0ull;  // floats in snap_out (thread 0)
     if (tid == 0) {
         st = rng_states[mu_id];
         sh_active = num_waters[mu_id];
-        sh_snap_id = 0;
+        sh_snap_id = carry.snap_id[mu_id];
+        sh_exit = TITRATION_DONE;
+        snap_used = arena.used[mu_id];
     }
     __syncthreads();
 
@@ -152,11 +169,39 @@ __global__ void run_gcmc_titration_kernel(
     unsigned long long w_accepted[3] = {0ull, 0ull, 0ull};
     unsigned long long w_capacity_blocked = 0ull;
     unsigned long long w_n_sum = 0ull;
+    // A window can straddle a relaunch, so its partial counts are carried.
+    if (tid == 0 && diag_on) {
+        const unsigned long long* c = carry.diag + (size_t)mu_id * DIAG_CARRY_SLOTS;
+#pragma unroll
+        for (int m = 0; m < 3; ++m) { w_proposed[m] = c[m]; w_accepted[m] = c[3 + m]; }
+        w_capacity_blocked = c[6];
+        w_n_sum = c[7];
+    }
 
     float trial_water[WATER_SIZE];
 
-    for (uint32_t step = 0; step < steps; ++step) {
+    uint32_t step = step_begin;
+    for (; step < step_stop; ++step) {
         if (tid == 0) {
+            const uint32_t active = sh_active;
+
+            // ------------ stop for the host? ------------
+            // Decided before this step draws any random number, so resuming
+            // here later replays the step exactly. A step can add at most one
+            // water, so a snapshot taken at its end needs room for active + 1.
+            const bool snap_step =
+                step >= equil_steps_local && steps_between_snaps > 0 &&
+                ((step - equil_steps_local) % steps_between_snaps) == 0 && sh_snap_id < n_snapshots;
+            if (grow_on_full && active >= water_capacity_local) {
+                sh_exit = TITRATION_WATER_BUFFER_FULL;
+            } else if (snap_step &&
+                       snap_used + (unsigned long long)(active + 1u) * WATER_SIZE > arena.floats_per_mu) {
+                sh_exit = TITRATION_SNAPSHOT_BUFFER_FULL;
+            }
+        }
+        // Every thread already waits at the barrier after the proposal, so
+        // the stop decision rides on it instead of costing a barrier of its own.
+        if (tid == 0 && sh_exit == TITRATION_DONE) {
             const uint32_t active = sh_active;
 
             const uint32_t rnd_pos_idx = (uint32_t)rand_int(&st, (int)boundaries_max);
@@ -199,7 +244,7 @@ __global__ void run_gcmc_titration_kernel(
                 for (int i=0;i<WATER_SIZE;++i) sh_old[i]=0.0f;
 
             } else if (move_type == 1) {
-                const uint32_t src = mu_waters_base + tgt_idx * (uint32_t)WATER_SIZE;
+                const size_t src = mu_waters_base + (size_t)tgt_idx * WATER_SIZE;
                 load_water_from_array(water_atoms, src, trial_water);
 #pragma unroll
                 for (int i=0;i<WATER_SIZE;++i) sh_trial[i]=trial_water[i];
@@ -207,7 +252,7 @@ __global__ void run_gcmc_titration_kernel(
                 for (int i=0;i<WATER_SIZE;++i) sh_old[i]=0.0f;
 
             } else {
-                const uint32_t src = mu_waters_base + tgt_idx * (uint32_t)WATER_SIZE;
+                const size_t src = mu_waters_base + (size_t)tgt_idx * WATER_SIZE;
 
                 float oldw[WATER_SIZE];
                 load_water_from_array(water_atoms, src, oldw);
@@ -241,6 +286,10 @@ __global__ void run_gcmc_titration_kernel(
 
         __syncthreads();
 
+        // Block-uniform: sh_exit is only written by thread 0 before the
+        // barrier above, so every thread leaves together.
+        if (sh_exit != TITRATION_DONE) break;
+
         const uint32_t active = sh_active;
         const uint32_t move_type = sh_move_type;
         int skip_w_idx = -1;
@@ -250,7 +299,7 @@ __global__ void run_gcmc_titration_kernel(
             receptor_atoms, sh_trial, n_receptor_atoms_u, sh_partials
         );
         const float e_wat_new = eval_energy_with_waters(
-            water_atoms, sh_trial, mu_id, active, target_n_waters_local, skip_w_idx, sh_partials
+            water_atoms, sh_trial, mu_id, active, water_capacity_local, skip_w_idx, sh_partials
         );
 
         float e_rec_old = 0.0f;
@@ -261,7 +310,7 @@ __global__ void run_gcmc_titration_kernel(
                 receptor_atoms, sh_old, n_receptor_atoms_u, sh_partials
             );
             e_wat_old = eval_energy_with_waters(
-                water_atoms, sh_old, mu_id, active, target_n_waters_local, skip_w_idx, sh_partials
+                water_atoms, sh_old, mu_id, active, water_capacity_local, skip_w_idx, sh_partials
             );
         }
 
@@ -280,16 +329,19 @@ __global__ void run_gcmc_titration_kernel(
                 const float pref = (1.0f / (float)(active_local + 1u)) * expf(B);
                 const float p_acc = fminf(pref * expf(-(float)BETA * delta_e), 1.0f);
 
-                if (u < p_acc && active_local < target_n_waters_local) {
-                    const uint32_t dst = mu_waters_base + active_local * (uint32_t)WATER_SIZE;
+                // With grow_on_full the block never gets here at capacity
+                // (it stops at the top of the step instead), so this guard
+                // only bites once the run's max_waters limit is reached.
+                if (u < p_acc && active_local < water_capacity_local) {
+                    const size_t dst = mu_waters_base + (size_t)active_local * WATER_SIZE;
                     copy_water_to_array(trial_water, water_atoms, dst);
                     active_local += 1u;
                     num_waters[mu_id] += 1u;
                     if (diag_on) w_accepted[0] += 1ull;
                 } else if (diag_on && u < p_acc) {
-                    // Metropolis said yes, the fixed-size water buffer said no.
+                    // Metropolis said yes, the max_waters limit said no.
                     // Tracked apart from genuine rejections: a run where this is
-                    // not negligible is box-limited, not badly converged.
+                    // not negligible is limit-bound, not badly converged.
                     w_capacity_blocked += 1ull;
                 }
 
@@ -301,8 +353,8 @@ __global__ void run_gcmc_titration_kernel(
                 const float p_acc = fminf(pref * expf(-(float)BETA * delta_e), 1.0f);
                 if (u < p_acc) {
                     const uint32_t del_idx = sh_tgt_idx;
-                    const uint32_t dst  = mu_waters_base + del_idx * (uint32_t)WATER_SIZE;
-                    const uint32_t last = mu_waters_base + (active_local - 1u) * (uint32_t)WATER_SIZE;
+                    const size_t dst  = mu_waters_base + (size_t)del_idx * WATER_SIZE;
+                    const size_t last = mu_waters_base + (size_t)(active_local - 1u) * WATER_SIZE;
 
                     if (del_idx + 1u < active_local) {
                         move_water_in_array(water_atoms, last, dst);
@@ -322,7 +374,7 @@ __global__ void run_gcmc_titration_kernel(
 
                 if (u < p_acc) {
                     const uint32_t tgt = sh_tgt_idx;
-                    const uint32_t dst = mu_waters_base + tgt * (uint32_t)WATER_SIZE;
+                    const size_t dst = mu_waters_base + (size_t)tgt * WATER_SIZE;
                     copy_water_to_array(trial_water, water_atoms, dst);
                     if (diag_on) w_accepted[2] += 1ull;
                 }
@@ -340,23 +392,15 @@ __global__ void run_gcmc_titration_kernel(
             // dominated the reported N_region_std.
             if (step >= equil_steps_local && steps_between_snaps > 0) {
                 if (((step - equil_steps_local) % steps_between_snaps) == 0 && sh_snap_id < n_snapshots) {
-
-                    const uint32_t base =
-                        mu_id * n_snapshots * target_n_waters_local * (uint32_t)WATER_SIZE +
-                        sh_snap_id * target_n_waters_local * (uint32_t)WATER_SIZE;
-
-                    uint32_t out_idx = base;
-
-                    for (uint32_t w = 0; w < active_local; ++w) {
-                        const uint32_t src = mu_waters_base + w * (uint32_t)WATER_SIZE;
-#pragma unroll
-                        for (int i = 0; i < WATER_SIZE; ++i) snapshots[out_idx++] = water_atoms[src + i];
-                    }
-
-                    for (uint32_t w = active_local; w < target_n_waters_local; ++w) {
-#pragma unroll
-                        for (int i = 0; i < WATER_SIZE; ++i) snapshots[out_idx++] = 0.0f;
-                    }
+                    // Appended unpadded: the frame is exactly active_local
+                    // waters, and its size goes to arena.counts. The stop
+                    // check at the top of the step guaranteed the room.
+                    const size_t n_floats = (size_t)active_local * WATER_SIZE;
+                    const float* src = water_atoms + mu_waters_base;
+                    float* dst = snap_out + snap_used;
+                    for (size_t i = 0; i < n_floats; ++i) dst[i] = src[i];
+                    snap_used += n_floats;
+                    arena.counts[(size_t)mu_id * n_snapshots + sh_snap_id] = active_local;
 
                     sh_snap_id += 1u;
                 }
@@ -396,7 +440,7 @@ __global__ void run_gcmc_titration_kernel(
                 if (want_energy) {
                     e_total = 0.0f;
                     for (uint32_t k = 0; k < n_active; ++k) {
-                        const uint32_t src = mu_waters_base + k * (uint32_t)WATER_SIZE;
+                        const size_t src = mu_waters_base + (size_t)k * WATER_SIZE;
                         if (tid < WATER_SIZE) sh_diag[tid] = water_atoms[src + tid];
                         __syncthreads();
 
@@ -405,7 +449,7 @@ __global__ void run_gcmc_titration_kernel(
                         );
                         e_total += 0.5f * eval_energy_with_waters(
                             water_atoms, sh_diag, mu_id, n_active,
-                            target_n_waters_local, (int)k, sh_partials
+                            water_capacity_local, (int)k, sh_partials
                         );
                     }
                 }
@@ -433,8 +477,21 @@ __global__ void run_gcmc_titration_kernel(
         }
     }
 
+    // Save everything the next launch needs to resume at `step` (== steps
+    // when the chain ran to completion).
     if (tid == 0) {
         rng_states[mu_id] = st;
         num_waters[mu_id] = sh_active;
+        carry.step[mu_id] = step;
+        carry.snap_id[mu_id] = sh_snap_id;
+        carry.exit_reason[mu_id] = sh_exit;
+        arena.used[mu_id] = snap_used;
+        if (diag_on) {
+            unsigned long long* c = carry.diag + (size_t)mu_id * DIAG_CARRY_SLOTS;
+#pragma unroll
+            for (int m = 0; m < 3; ++m) { c[m] = w_proposed[m]; c[3 + m] = w_accepted[m]; }
+            c[6] = w_capacity_blocked;
+            c[7] = w_n_sum;
+        }
     }
 }

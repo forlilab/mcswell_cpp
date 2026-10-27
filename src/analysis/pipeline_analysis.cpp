@@ -128,9 +128,7 @@ std::string run_binomial_analysis(
                                  ".0_binomial";
     fs::create_directories(out_dir);
 
-    const auto water_capacity =
-        static_cast<std::size_t>(std::floor(sampler_volume * cfg.bulk_water_density));
-    if (water_capacity == 0) throw std::runtime_error("Reconstructed water-buffer capacity is zero.");
+    const std::size_t water_capacity = cfg.water_capacity;
 
     auto capacity = scan_capacity_and_collect_density_points(
         frames_by_mu, mu_values, water_capacity, cfg.capacity_filter, cfg.max_capacity_hit_fraction,
@@ -146,8 +144,8 @@ std::string run_binomial_analysis(
     const std::size_t mu_eq_idx = argmin_abs_diff(mu_values, cfg.mu_bulk);
     if (!capacity.valid_mask[mu_eq_idx]) {
         throw std::runtime_error(
-            "The sampled window nearest bulk mu is already capacity-limited. Increase the MCSwell "
-            "water-buffer capacity and rerun.");
+            "The sampled window nearest bulk mu is already capacity-limited. Raise max_waters "
+            "(or set it to 0 for no limit) and rerun.");
     }
 
     write_csv_table(out_dir + "/capacity_diagnostics.csv", capacity_diagnostics_header("valid_for_binomial"), [&] {
@@ -340,8 +338,7 @@ std::string run_binomial_analysis(
         .add("peak_percentile", cfg.peak_percentile)
         .add("sampler_volume_A3", sampler_volume)
         .add("n_insertion_points", static_cast<long long>(n_insertion_points))
-        .add("bulk_water_density_A-3", cfg.bulk_water_density)
-        .add("reconstructed_water_capacity", static_cast<long long>(water_capacity))
+        .add("max_waters", static_cast<long long>(water_capacity))  // 0 = unlimited
         .add("capacity_filter_enabled", cfg.capacity_filter)
         .add("max_capacity_hit_fraction", cfg.max_capacity_hit_fraction)
         .add("max_mean_capacity_fraction", cfg.max_mean_capacity_fraction)
@@ -369,8 +366,7 @@ std::string run_gci_analysis(
 
     const double kT = static_cast<double>(KT);
     const double standard_volume = static_cast<double>(STANDARD_VOLUME);
-    const auto water_capacity = static_cast<std::size_t>(std::floor(sampler_volume * cfg.bulk_water_density));
-    if (water_capacity == 0) throw std::runtime_error("Reconstructed water-buffer capacity is zero.");
+    const std::size_t water_capacity = cfg.water_capacity;
 
     const std::size_t n_mu = mu_values.size();
     std::vector<double> B(n_mu);
@@ -390,8 +386,8 @@ std::string run_gci_analysis(
     const std::size_t mu_eq_idx = argmin_abs_diff(mu_values, cfg.mu_bulk);
     if (!capacity.valid_mask[mu_eq_idx]) {
         throw std::runtime_error(
-            "The sampled window nearest bulk water chemical potential is capacity-limited. Increase the "
-            "sampler water-buffer capacity and rerun.");
+            "The sampled window nearest bulk water chemical potential is capacity-limited. Raise "
+            "max_waters (or set it to 0 for no limit) and rerun.");
     }
 
     const auto peaks = detect_sites(capacity.density_points, cfg);
@@ -682,8 +678,7 @@ std::string run_gci_analysis(
         .add("bulk_mu_kcal_mol", cfg.mu_bulk)
         .add("sampler_volume_A3", sampler_volume)
         .add("n_insertion_points", static_cast<long long>(n_insertion_points))
-        .add("bulk_water_density_waters_A3", cfg.bulk_water_density)
-        .add("reconstructed_water_capacity", static_cast<long long>(water_capacity))
+        .add("max_waters", static_cast<long long>(water_capacity))  // 0 = unlimited
         .add("capacity_filter_enabled", cfg.capacity_filter)
         .add("n_gci_valid_mu_windows", static_cast<long long>(n_valid))
         .add("nearest_bulk_mu_kcal_mol", mu_values[mu_eq_idx])

@@ -264,6 +264,17 @@ Omit this section for receptor-only hydration.
 | `simulation_parameters.seed` |  | int | GCMC master RNG seed, default `12345` | `20260901` |
 | `simulation_parameters.n_diagnostic_windows` |  | int | ≥ 0, default `1000`; `0` disables | `1000` |
 | `simulation_parameters.diagnostic_energy_stride` |  | int | ≥ 1, default `1` | `20` |
+| `simulation_parameters.max_waters` |  | int | ≥ 0, default `0` (no limit) | `0` |
+
+There is no limit on the number of waters per µ window. The water buffer
+starts at the bulk-water estimate (insertion volume × 0.0334 Å⁻³) and doubles
+whenever a window fills it, and snapshots are streamed from a fixed-size GPU
+staging buffer to host memory, so GPU memory no longer grows with
+`n_snapshots`. Growing the buffer does not perturb the chain: a run follows
+exactly the chain the old fixed-buffer code did, for as long as that code would
+not have refused an insertion. `max_waters` restores a hard limit: insertions
+beyond it are refused and counted as capacity-blocked, and the `[gci]`
+capacity filter then excludes the windows that ran into it.
 
 Set `seed` explicitly when running replicates of the same system, so that the
 Markov chains differ by design rather than by accident.
@@ -279,7 +290,7 @@ replay it rather than re-prepping.
 
 `n_diagnostic_windows` splits the run into equal windows and records, for each
 (µ, window), the number of insertion/deletion/displacement moves proposed and
-accepted, insertions blocked by the water-buffer capacity, the mean and final
+accepted, insertions blocked by `max_waters` (always 0 without one), the mean and final
 water count, and the total water-subsystem energy. These go to
 `acceptance_windows.csv` and `acceptance_summary.csv` under `save_path` (see
 [Output](#output)). The counters draw no random numbers, so an instrumented
@@ -326,8 +337,7 @@ Every key has a default, so the whole section may be omitted.
 | `gci.peak_percentile` |  | float | 0 < value ≤ 100, default `90.0` | `90.0` |
 | `gci.mu_bulk` |  | float | kcal/mol | `-6.09` |
 | `gci.temperature` |  | float | K, default `300.0` | `300.0` |
-| `gci.capacity_filter` |  | bool | default `true` | `true` |
-| `gci.bulk_water_density` |  | float | waters/Å³, default `0.0334` | `0.0334` |
+| `gci.capacity_filter` |  | bool | default `true`; only acts with `max_waters` set | `true` |
 | `gci.max_capacity_hit_fraction` |  | float | 0–1, default `0.01` | `0.01` |
 | `gci.max_mean_capacity_fraction` |  | float | 0–1, default `0.90` | `0.90` |
 | `gci.local_radius` |  | float | Å, default `1.4` | `1.4` |
@@ -363,6 +373,7 @@ different energy function/cutoff than MCSwell's own sampler.
 | `n_gcmc_steps >= n_equilibration_steps` |
 | `mu_range.start < mu_range.stop` |
 | `mu_range.step > 0` |
+| `n_gcmc_steps - n_equilibration_steps >= n_snapshots` |
 | `spacing > 0` |
 | `x_size > 0`, `y_size > 0`, `z_size > 0` |
 
@@ -423,7 +434,7 @@ writes only the final result artifacts:
 `acceptance_summary.csv` has one row per (µ, phase) with phase in
 `equilibration` / `production` / `total`: moves proposed and accepted for each
 of the three move types, the resulting acceptance rates, insertions refused by
-the water-buffer capacity, and the mean and final water count.
+`max_waters` (always 0 without one), and the mean and final water count.
 `acceptance_windows.csv` is the same breakdown resolved per window, plus the
 water-subsystem energy, and is what a convergence analysis reads.
 

@@ -32,6 +32,10 @@ namespace mcswell {
 struct PipelineResult {
     std::size_t n_insertion_points = 0;
     double sampler_volume = 0.0;
+    // See TitrationResult: the enforced limit (0 = none) and the size the
+    // per-window water buffer grew to.
+    std::size_t max_waters = 0;
+    std::size_t water_capacity = 0;
     std::string binomial_output_dir;
     std::string gci_output_dir;
 
@@ -50,6 +54,9 @@ struct PipelineResult {
 // the only reason this lives outside the CUDA-free mcswell_analysis
 // library; the analyses themselves (run_binomial_analysis/run_gci_analysis
 // in analysis/pipeline_analysis.hpp) do not.
+//
+// analysis_cfg.water_capacity is ignored: the analyses are given the
+// max_waters the titration actually ran with.
 PipelineResult run_mcswell_full_pipeline(
     const std::vector<Atom>& receptor_points, const float* insertion_points_xyz, std::size_t n_points,
     float distance_cutoff, float spacing, std::size_t gcmc_steps, std::size_t equilibration_steps,
@@ -58,6 +65,7 @@ PipelineResult run_mcswell_full_pipeline(
     std::uint64_t seed = 12345ULL, bool dump_debug_pdbs = false,
     std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
     std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
-    const InsertionGrid* cavity_grid = nullptr, bool constrain_displacement = false);
+    const InsertionGrid* cavity_grid = nullptr, bool constrain_displacement = false,
+    std::size_t max_waters = 0, std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES);
 
 } // namespace mcswell

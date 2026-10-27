@@ -26,41 +26,25 @@
 
 namespace mcswell::analysis {
 
-std::vector<MuWindowFrames> extract_oxygen_frames(
-    const std::vector<float>& snapshots_flat,
-    std::size_t n_mu,
-    std::size_t n_snapshots,
-    std::size_t max_n_waters
-) {
+std::vector<MuWindowFrames> extract_oxygen_frames(const WaterSnapshots& snapshots) {
+    snapshots.validate();
     const auto water_size = static_cast<std::size_t>(WATER_SIZE);
-    std::vector<MuWindowFrames> frames_by_mu(n_mu);
+    std::vector<MuWindowFrames> frames_by_mu(snapshots.n_mu);
 
-    for (std::size_t mu_idx = 0; mu_idx < n_mu; ++mu_idx) {
+    for (std::size_t mu_idx = 0; mu_idx < snapshots.n_mu; ++mu_idx) {
         auto& mu_frames = frames_by_mu[mu_idx].frames;
-        mu_frames.resize(n_snapshots);
+        mu_frames.resize(snapshots.n_snapshots);
 
-        for (std::size_t snap_idx = 0; snap_idx < n_snapshots; ++snap_idx) {
-            const std::size_t snapshot_base =
-                (mu_idx * n_snapshots * max_n_waters * water_size) +
-                (snap_idx * max_n_waters * water_size);
+        for (std::size_t snap_idx = 0; snap_idx < snapshots.n_snapshots; ++snap_idx) {
+            const std::size_t n_waters = snapshots.n_waters(mu_idx, snap_idx);
+            const float* frame = snapshots.frame(mu_idx, snap_idx);
 
             auto& oxygens = mu_frames[snap_idx].oxygens;
-            oxygens.reserve(max_n_waters);
-
-            for (std::size_t water_idx = 0; water_idx < max_n_waters; ++water_idx) {
-                const std::size_t wat_index = snapshot_base + water_idx * water_size;
-                if (wat_index + water_size - 1 >= snapshots_flat.size()) break;
-
-                const double o_x = static_cast<double>(snapshots_flat[wat_index + OX]);
-                const double o_y = static_cast<double>(snapshots_flat[wat_index + OY]);
-                const double o_z = static_cast<double>(snapshots_flat[wat_index + OZ]);
-
-                // Inactive slot: the GPU kernel zero-initializes the water
-                // buffer and never writes unused slots, exactly the
-                // convention the old PDB writer skipped on.
-                if (o_x == 0.0 && o_y == 0.0 && o_z == 0.0) continue;
-
-                oxygens.push_back({o_x, o_y, o_z});
+            oxygens.reserve(n_waters);
+            for (std::size_t water_idx = 0; water_idx < n_waters; ++water_idx) {
+                const float* w = frame + water_idx * water_size;
+                oxygens.push_back({static_cast<double>(w[OX]), static_cast<double>(w[OY]),
+                                   static_cast<double>(w[OZ])});
             }
         }
     }
@@ -76,9 +60,6 @@ CapacityScanResult scan_capacity_and_collect_density_points(
     double max_capacity_hit_fraction,
     double max_mean_capacity_fraction
 ) {
-    if (water_capacity == 0) {
-        throw std::invalid_argument("water_capacity must be positive");
-    }
     if (frames_by_mu.size() != mu_values.size()) {
         throw std::invalid_argument("frames_by_mu and mu_values must have the same length");
     }
@@ -87,6 +68,8 @@ CapacityScanResult scan_capacity_and_collect_density_points(
     result.diagnostics.reserve(frames_by_mu.size());
     result.valid_mask.assign(frames_by_mu.size(), false);
 
+    const bool limited = water_capacity > 0;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
     bool prefix_open = true;
 
     for (std::size_t j = 0; j < frames_by_mu.size(); ++j) {
@@ -114,7 +97,7 @@ CapacityScanResult scan_capacity_and_collect_density_points(
                 const std::size_t c = f.oxygens.size();
                 sum += static_cast<double>(c);
                 max_n = std::max(max_n, c);
-                if (c >= water_capacity) ++hits;
+                if (limited && c >= water_capacity) ++hits;
             }
             const double mean_n = sum / static_cast<double>(frames.size());
 
@@ -130,17 +113,21 @@ CapacityScanResult scan_capacity_and_collect_density_points(
             diag.n_region_mean = mean_n;
             diag.n_region_std = std_n;
             diag.n_region_max_observed = max_n;
-            diag.capacity_mean_fraction = mean_n / static_cast<double>(water_capacity);
-            diag.capacity_hit_fraction = static_cast<double>(hits) / static_cast<double>(frames.size());
+            diag.capacity_mean_fraction = limited ? mean_n / static_cast<double>(water_capacity) : nan;
+            diag.capacity_hit_fraction =
+                limited ? static_cast<double>(hits) / static_cast<double>(frames.size()) : nan;
 
-            triggers_capacity = capacity_filter &&
+            triggers_capacity = limited && capacity_filter &&
                 (diag.capacity_hit_fraction > max_capacity_hit_fraction ||
                  diag.capacity_mean_fraction >= max_mean_capacity_fraction);
         }
 
         bool valid;
         std::string reason;
-        if (!capacity_filter) {
+        if (!limited) {
+            valid = true;
+            reason = "no_capacity_limit";
+        } else if (!capacity_filter) {
             valid = true;
             reason = "capacity_filter_disabled";
         } else if (prefix_open && triggers_capacity) {

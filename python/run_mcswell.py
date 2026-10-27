@@ -28,7 +28,7 @@ from utils import *
 import tomllib
 import estimate_free_energies as fe
 import estimate_free_energies_GCI as fe_gci
-from rdkit import Chem 
+from rdkit import Chem
 from rdkit.Chem import SDMolSupplier
 from openmm.app import *
 from openmm import *
@@ -387,6 +387,9 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         config["simulation_parameters"].get("n_diagnostic_windows", 1000))
     diagnostic_energy_stride = int(
         config["simulation_parameters"].get("diagnostic_energy_stride", 1))
+    # Hard limit on the waters per mu window. 0 (the default) means none: the
+    # water buffer grows on demand, so high-mu windows are no longer truncated.
+    max_waters = int(config["simulation_parameters"].get("max_waters", 0))
 
     #mu_range
     mu_values = expand_ranges(config["mu_range"])
@@ -428,6 +431,11 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     def gci_pick(key, default):
         return gci_cfg.get(key, default)
 
+    if "bulk_water_density" in gci_cfg:
+        print("[gci] bulk_water_density is no longer used and is ignored: the "
+              "water capacity is not derived from it anymore (see "
+              "simulation_parameters.max_waters)")
+
     mu_bulk_override = gci_pick("mu_bulk", None)
     mu_bulk, mu_bulk_water_model, mu_bulk_source = resolve_mu_bulk(
         None if mu_bulk_override is None else float(mu_bulk_override)
@@ -457,7 +465,6 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         run_gci=energy_estimation_method in ("gci", "both"),
         peak_percentile=float(gci_pick("peak_percentile", 90.0)),
         capacity_filter=bool(gci_pick("capacity_filter", True)),
-        bulk_water_density=float(gci_pick("bulk_water_density", 0.0334)),
         max_capacity_hit_fraction=float(gci_pick("max_capacity_hit_fraction", 0.01)),
         max_mean_capacity_fraction=float(gci_pick("max_mean_capacity_fraction", 0.90)),
         local_radius=float(gci_pick("local_radius", 1.4)),
@@ -469,6 +476,7 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
         seed=seed,
         n_diagnostic_windows=n_diagnostic_windows,
         diagnostic_energy_stride=diagnostic_energy_stride,
+        max_waters=max_waters,
     )
 
     exec_time = time.time() - start
