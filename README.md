@@ -333,8 +333,13 @@ for the energy.
 | Key | Req | Type | Constraints | Example |
 |-----|:---:|------|-------------|---------|
 | `mu_range.start` | ✓ | float | `< stop` | `-38.0` |
-| `mu_range.stop` | ✓ | float | `> start` | `2.0` |
+| `mu_range.stop` | ✓ | float | `> start` | `-4.0` |
 | `mu_range.step` | ✓ | float | > 0 | `1.0` |
+
+Going much above bulk µ (−6.87 kcal/mol for TIP4P, −6.09 for TIP3P) buys
+little: past roughly bulk + 3 the region keeps compressing water beyond bulk
+density and does not equilibrate in a feasible run, and those densest windows
+also set the run's wall time.
 
 ### `[openmm]` (optional)
 
