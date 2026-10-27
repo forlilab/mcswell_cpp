@@ -229,6 +229,16 @@ MCSwell is driven by a TOML config file; a working example lives in
 | Key | Req | Type | Constraints | Example |
 |-----|:---:|------|-------------|---------|
 | `io.save_path` | ✓ | string | valid directory path | `"/data/mcswell_runs/3std_monomer_rep_0"` |
+| `io.prepared_system` |  | string | file path | `"/data/mcswell_runs/prepared/3std.json"` |
+
+`prepared_system` lets several runs of the same system share one OpenMM prep.
+Write the file once with `--prepare-only` (see below). Every run whose config
+names the same file then loads the parametrized atoms from it instead of
+preparing the receptor and ligand again. This skips minutes of ligand charge
+fitting per run, and every replicate and water model scores against exactly
+the same atoms. A run refuses the file if its receptor or ligand files
+(compared by content), ligand force field or minimization setting differ from
+the ones the file was made with.
 
 ### `[receptor]` (optional)
 
@@ -425,6 +435,7 @@ Or run the provided example:
 | `--energy-estimation-method` | `both` | `gci`, `binomial`, or `both` |
 | `--minimize` / `--no-minimize` | from `[openmm]` | Energy-minimize the prepped receptor, or skip it |
 | `--openmm-platform` | from `[openmm]` | Platform for the prep step (`auto`, `CUDA`, `OpenCL`, `CPU`, `Reference`) |
+| `--prepare-only` | off | Only run the OpenMM prep, write it to `io.prepared_system`, and stop |
 
 By default a run performs the GCMC titration and both free-energy
 post-processing methods (ProtoMS-style GCI and the independent-site binomial

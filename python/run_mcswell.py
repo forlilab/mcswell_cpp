@@ -19,7 +19,10 @@
 
 import mcswell_cpp as mc
 import argparse
+import hashlib
 import io
+import json
+import tempfile
 import numpy as np
 import itertools
 import time
@@ -343,11 +346,80 @@ def get_data_from_openmm(receptors, project_path, small_molecules=None, small_mo
     return mcswell_atoms
 
 
+# Version of the prepared-system files written by --prepare-only.
+PREPARED_SYSTEM_FORMAT = 1
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fi:
+        for block in iter(lambda: fi.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def prepared_system_inputs(receptors, small_molecules, small_molecule_forcefield, minimize):
+    """Everything the OpenMM prep depends on, to check a prepared system against a config.
+
+    Files are identified by content, not path, so a system prepared on one
+    machine can be used on another where the inputs live somewhere else.
+    """
+    return {
+        "receptor_sha256": [_sha256(p) for p in receptors or []],
+        "ligand_sha256": [_sha256(p) for p in small_molecules or []],
+        "ligand_forcefield": small_molecule_forcefield,
+        "minimize": bool(minimize),
+    }
+
+
+def save_prepared_system(path, atoms, cleaned_pdb, inputs, sources):
+    """Write the parametrized atoms (and the cleaned receptor PDB) to a JSON file."""
+    data = {
+        "format": PREPARED_SYSTEM_FORMAT,
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "openmm_version": Platform.getOpenMMVersion(),
+        "inputs": inputs,
+        "sources": sources,
+        "cleaned_pdb": cleaned_pdb,
+        "atoms": [[a.atom_type, a.atom_id, list(a.coords), a.rmin_half, a.epsilon, a.charge]
+                  for a in atoms],
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as fo:
+        json.dump(data, fo)
+    os.replace(tmp, path)
+
+
+def load_prepared_system(path, inputs):
+    """Read a prepared system, refusing one made from different inputs or prep options."""
+    with open(path) as fi:
+        data = json.load(fi)
+    if data.get("format") != PREPARED_SYSTEM_FORMAT:
+        raise ValueError(f"{path}: prepared-system format {data.get('format')!r}, "
+                         f"this driver reads format {PREPARED_SYSTEM_FORMAT}. Prepare it again.")
+    mismatched = [k for k in inputs if data["inputs"].get(k) != inputs[k]]
+    if mismatched:
+        raise ValueError(f"{path} was prepared from different inputs than this config "
+                         f"({', '.join(mismatched)} differ). Prepare it again with --prepare-only.")
+    atoms = [mc.Atom(t, i, c, r, e, q) for t, i, c, r, e, q in data["atoms"]]
+    return atoms, data["cleaned_pdb"]
+
+
 def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_method="both",
-                minimize=None, openmm_platform=None):
+                minimize=None, openmm_platform=None, prepare_only=False):
     #io
     # project_path = config["io"]["save_path"]
-    os.makedirs(project_path, exist_ok=True)
+    # Parametrized receptor + ligand, prepared once (--prepare-only) and shared
+    # by every run of the same system (replicates, water models). Ligand charges
+    # alone take minutes, and sharing the file guarantees that every run scores
+    # against exactly the same atoms.
+    prepared_system = config["io"].get("prepared_system")
+    if prepare_only and not prepared_system:
+        raise ValueError("--prepare-only needs io.prepared_system in the config: "
+                         "the path to write the prepared system to")
+    if not prepare_only:
+        os.makedirs(project_path, exist_ok=True)
 
     #receptor
     receptor_path = None
@@ -421,16 +493,39 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     y_size = config["simulation_box"]["y_size"]
     z_size = config["simulation_box"]["z_size"]
 
+    prep_inputs = prepared_system_inputs(receptor_path, small_molecule_path, small_molecule_ff, minimize)
+    if prepared_system and not prepare_only:
+        if not os.path.exists(prepared_system):
+            raise FileNotFoundError(
+                f"io.prepared_system = {prepared_system} does not exist. Create it first with "
+                f"run_mcswell.py --config <this config> --prepare-only")
+        print(f"Using the prepared system {prepared_system} (no OpenMM prep)")
+        parametrized_atoms, cleaned_pdb = load_prepared_system(prepared_system, prep_inputs)
+        if cleaned_pdb is not None:
+            with open(f"{project_path}/system_cleaned.pdb", "w") as fo:
+                fo.write(cleaned_pdb)
+    else:
+        print("Parametrizing system with OpenMM...")
+        # With --prepare-only nothing goes to save_path: the cleaned PDB is
+        # written to a scratch folder and stored in the prepared system.
+        with tempfile.TemporaryDirectory() as scratch:
+            prep_dir = scratch if prepare_only else project_path
+            parametrized_atoms = get_data_from_openmm(receptors=receptor_path,
+                project_path=prep_dir,
+                small_molecules=small_molecule_path,
+                small_molecule_forcefield=small_molecule_ff,
+                minimize=minimize,
+                minimize_max_iterations=minimize_max_iterations,
+                platform_name=openmm_platform,)
+            cleaned = os.path.join(prep_dir, "system_cleaned.pdb")
+            cleaned_pdb = open(cleaned).read() if os.path.exists(cleaned) else None
+        if prepare_only:
+            save_prepared_system(prepared_system, parametrized_atoms, cleaned_pdb, prep_inputs,
+                                 {"receptor": receptor_path, "ligand": small_molecule_path})
+            print(f"Wrote the prepared system ({len(parametrized_atoms)} atoms) to {prepared_system}")
+            return None
+
     save_box_corners_pdb([center_x, center_y, center_z], [x_size, y_size, z_size], outfile=f"{project_path}/box.pdb")
-    
-    print("Parametrizing system with OpenMM...")
-    parametrized_atoms = get_data_from_openmm(receptors=receptor_path,
-        project_path=project_path,
-        small_molecules=small_molecule_path,
-        small_molecule_forcefield=small_molecule_ff,
-        minimize=minimize,
-        minimize_max_iterations=minimize_max_iterations,
-        platform_name=openmm_platform,)
 
     print(f"Starting MCSwell! (GCMC seed: {seed})")
     center = [center_x, center_y, center_z]
@@ -553,6 +648,15 @@ def build_parser():
         help="Skip the minimization even if [openmm] minimize = true.",
     )
     parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help=(
+            "Only parametrize the receptor and ligand with OpenMM and write them "
+            "to io.prepared_system, then stop. Runs whose config sets the same "
+            "io.prepared_system then reuse it instead of preparing the system again."
+        ),
+    )
+    parser.add_argument(
         "--openmm-platform",
         dest="openmm_platform",
         default=None,
@@ -575,8 +679,11 @@ if __name__ == "__main__":
     print("Starting")
     run_info = run_mcswell(
         config, project_path_base, energy_estimation_method=args.energy_estimation_method,
-        minimize=args.minimize, openmm_platform=args.openmm_platform
+        minimize=args.minimize, openmm_platform=args.openmm_platform,
+        prepare_only=args.prepare_only,
     )
+    if args.prepare_only:
+        raise SystemExit(0)
 
     # The titration + free-energy fits already ran (in C++, in memory) as
     # part of run_mcswell() above; this just draws the diagnostic plots
