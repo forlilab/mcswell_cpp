@@ -170,18 +170,27 @@ def rmin_half(sigma):
 # -----------------------------------------------------------------------------
 # Water-model-dependent bulk chemical potential
 # -----------------------------------------------------------------------------
-# Excess chemical potential of bulk water (kcal/mol, ~300 K), keyed by the
+# Excess chemical potential of bulk water (kcal/mol, 300 K), keyed by the
 # WATER_MODEL compiled into the mcswell_cpp CUDA extension (see
 # CMakeLists.txt and include/cuda/water_model.cuh).
 #
-# These are published particle-insertion/FEP literature values (e.g. Mahoney &
-# Jorgensen, J. Chem. Phys. 112, 8910 (2000), for TIP3P/TIP4P), computed with
-# a DIFFERENT energy function, LJ cutoff, and long-range electrostatics
-# treatment than the MCSwell GCMC sampler (include/cuda/energy.cuh). Treat
-# them as starting points only -- recalibrate mu_bulk with MCSwell's own
-# sampler (e.g. a bulk-box titration) before trusting absolute DeltaG_bind
-# values for production work.
+# These are calibrated with MCSwell's own energy function (Coulomb without
+# cutoff, O-O LJ to 12 A, no tail correction, no periodic boundaries): mu_bulk
+# is the mu at which the sampler fills a cube cut out of equilibrated bulk water,
+# held in place by the surrounding frozen water, back to the model's bulk
+# density. Mean over 20 and 26 A cubes, 3 snapshots and empty/full starts
+# (sd 0.05 kcal/mol TIP3P, 0.07 TIP4P). Method, scripts and results:
+# calibration/mu_bulk/. Recalibrate if the energy function changes.
 MU_BULK_BY_WATER_MODEL = {
+    "TIP3P": -6.30,
+    "TIP4P": -6.09,
+}
+
+# Published values (particle insertion/FEP, e.g. Mahoney & Jorgensen,
+# J. Chem. Phys. 112, 8910 (2000)), computed with periodic boundaries, Ewald
+# and other cutoffs. Kept for reference and for re-referencing results of runs
+# that used them; not used as defaults.
+LITERATURE_MU_BULK_BY_WATER_MODEL = {
     "TIP3P": -6.09,
     "TIP4P": -6.87,
 }
@@ -209,13 +218,12 @@ def resolve_mu_bulk(explicit_mu_bulk):
     Priority:
       1. ``explicit_mu_bulk`` if not None (CLI/config override) -- trusted
          as-is, no warning.
-      2. A literature default keyed by the water model the mcswell_cpp
-         extension was compiled with (see MU_BULK_BY_WATER_MODEL above), with
-         a loud warning that it is an unverified literature value for this
-         specific sampler.
-      3. If the compiled model can't be detected, fall back to the legacy
-         TIP3P default with a loud warning. If the model IS detected but has
-         no table entry, raise rather than guess.
+      2. The value calibrated with MCSwell's own energy function for the
+         water model the mcswell_cpp extension was compiled with (see
+         MU_BULK_BY_WATER_MODEL above).
+      3. If the compiled model can't be detected, fall back to the TIP3P
+         value with a loud warning. If the model IS detected but has no
+         table entry, raise rather than guess.
 
     Returns
     -------
@@ -231,15 +239,15 @@ def resolve_mu_bulk(explicit_mu_bulk):
         print(
             "[mu_bulk] WARNING: mu_bulk was not supplied and the compiled "
             "mcswell_cpp water model could not be detected (extension not "
-            "importable in this environment). Assuming the legacy default "
-            f"(TIP3P, {mu_bulk} kcal/mol). If this run used a different "
+            "importable in this environment). Assuming the calibrated TIP3P "
+            f"value ({mu_bulk} kcal/mol). If this run used a different "
             "water model, pass --mu-bulk / gci.mu_bulk explicitly."
         )
         return float(mu_bulk), None, "fallback_tip3p_model_undetected"
 
     if water_model not in MU_BULK_BY_WATER_MODEL:
         raise RuntimeError(
-            f"No literature bulk-water excess chemical potential is known for "
+            f"No calibrated bulk-water excess chemical potential is known for "
             f"compiled water model '{water_model}'. Pass --mu-bulk / "
             f"gci.mu_bulk explicitly (known models: "
             f"{sorted(MU_BULK_BY_WATER_MODEL)})."
@@ -247,12 +255,8 @@ def resolve_mu_bulk(explicit_mu_bulk):
 
     mu_bulk = MU_BULK_BY_WATER_MODEL[water_model]
     print(
-        f"[mu_bulk] WARNING: no explicit mu_bulk given. Auto-selected the "
-        f"literature bulk excess chemical potential for the compiled water "
-        f"model '{water_model}': {mu_bulk} kcal/mol. This is a published "
-        "value computed with a different energy function/cutoff than the "
-        "MCSwell GCMC sampler -- recalibrate with this sampler before "
-        "trusting absolute DeltaG_bind values. Override with --mu-bulk / "
-        "gci.mu_bulk to silence this warning."
+        f"[mu_bulk] no explicit mu_bulk given; using {mu_bulk} kcal/mol, calibrated "
+        f"with MCSwell's energy function for the compiled water model '{water_model}' "
+        "(calibration/mu_bulk/). Override with --mu-bulk / gci.mu_bulk."
     )
-    return float(mu_bulk), water_model, f"literature_default_{water_model.lower()}"
+    return float(mu_bulk), water_model, f"calibrated_default_{water_model.lower()}"
