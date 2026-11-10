@@ -50,9 +50,11 @@ struct PostAnalysisConfig {
     double peak_percentile = 90.0;
     double peak_merge_cutoff = 1.4;
 
-    // Capacity-safety filtering (shared).
+    // Capacity-safety filtering (shared). water_capacity is the hard limit the
+    // sampler enforced on the water count (its max_waters); 0 means it had
+    // none, in which case no window can be truncated and the filter is moot.
     bool capacity_filter = true;
-    double bulk_water_density = 0.0334;
+    std::size_t water_capacity = 0;
     double max_capacity_hit_fraction = 0.01;
     double max_mean_capacity_fraction = 0.90;
 

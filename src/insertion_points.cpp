@@ -17,9 +17,11 @@
 //  License along with this library; if not, write to the Free Software
 //  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "insertion_points.hpp"
 #include "atom.hpp"
@@ -38,7 +40,7 @@ static inline double min_dist2_to_atoms(const std::array<double,3>& p,
     return best;
 }
 
-std::vector<double> make_insertion_points_flat(
+InsertionGrid make_insertion_grid(
     const std::vector<Atom>& atoms,
     const GridSpec& grid,
     double max_distance,
@@ -67,8 +69,12 @@ std::vector<double> make_insertion_points_flat(
     const double max2 = max_distance * max_distance;
     const double min2 = min_distance * min_distance;
 
-    std::vector<double> out;
-    out.reserve(static_cast<size_t>(x_points * y_points * z_points) * 3);
+    InsertionGrid out;
+    out.dims = {x_points, y_points, z_points};
+    out.origin = {x_min, y_min, z_min};
+    out.spacing = spacing;
+    out.points_xyz.reserve(static_cast<size_t>(x_points * y_points * z_points) * 3);
+    out.mask.assign(static_cast<size_t>(x_points * y_points * z_points), 0u);
 
     for (std::int64_t i = 0; i < x_points; i++) {
         const double x = x_min + static_cast<double>(i) * spacing;
@@ -83,12 +89,64 @@ std::vector<double> make_insertion_points_flat(
                     if (d2 > max2 || d2 < min2) continue;
                 }
 
-                out.push_back(x);
-                out.push_back(y);
-                out.push_back(z);
+                out.points_xyz.push_back(x);
+                out.points_xyz.push_back(y);
+                out.points_xyz.push_back(z);
+                out.mask[out.index(i, j, k)] = 1u;
             }
         }
     }
 
     return out;
+}
+
+InsertionGrid insertion_grid_from_points(const float* points_xyz, std::size_t n_points, double spacing) {
+    if (n_points == 0 || spacing <= 0.0) {
+        throw std::invalid_argument("insertion_grid_from_points: need points and a positive spacing");
+    }
+    InsertionGrid out;
+    out.spacing = spacing;
+    std::array<double, 3> hi{};
+    for (int a = 0; a < 3; ++a) {
+        out.origin[a] = std::numeric_limits<double>::infinity();
+        hi[a] = -std::numeric_limits<double>::infinity();
+    }
+    for (std::size_t p = 0; p < n_points; ++p) {
+        for (int a = 0; a < 3; ++a) {
+            const double v = points_xyz[3 * p + a];
+            out.origin[a] = std::min(out.origin[a], v);
+            hi[a] = std::max(hi[a], v);
+        }
+    }
+    for (int a = 0; a < 3; ++a) {
+        out.dims[a] = static_cast<std::int64_t>(std::llround((hi[a] - out.origin[a]) / spacing)) + 1;
+    }
+    out.mask.assign(static_cast<std::size_t>(out.dims[0] * out.dims[1] * out.dims[2]), 0u);
+    out.points_xyz.reserve(3 * n_points);
+
+    for (std::size_t p = 0; p < n_points; ++p) {
+        std::int64_t idx[3];
+        for (int a = 0; a < 3; ++a) {
+            const double v = points_xyz[3 * p + a];
+            const double f = (v - out.origin[a]) / spacing;
+            idx[a] = static_cast<std::int64_t>(std::llround(f));
+            // Points arrive as float32; allow for that rounding, nothing more.
+            if (std::fabs(f - static_cast<double>(idx[a])) > 1e-3) {
+                throw std::invalid_argument("insertion_grid_from_points: point " + std::to_string(p) +
+                                            " is not on a lattice of spacing " + std::to_string(spacing));
+            }
+            out.points_xyz.push_back(v);
+        }
+        out.mask[out.index(idx[0], idx[1], idx[2])] = 1u;
+    }
+    return out;
+}
+
+std::vector<double> make_insertion_points_flat(
+    const std::vector<Atom>& atoms,
+    const GridSpec& grid,
+    double max_distance,
+    double min_distance
+) {
+    return make_insertion_grid(atoms, grid, max_distance, min_distance).points_xyz;
 }

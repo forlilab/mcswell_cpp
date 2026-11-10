@@ -27,9 +27,10 @@
 #include <stdexcept>
 #include <cstddef>
 
-#include "atom.hpp"          
+#include "atom.hpp"
 #include "cuda/consts.cuh"
 #include "cuda/water_model.cuh"
+#include "water_snapshots.hpp"
 
 namespace mcswell {
 
@@ -71,37 +72,28 @@ inline std::string atom_name_from_id(const std::string& atom_id) {
 }
 
 inline std::vector<std::vector<std::vector<Atom>>>
-reconstruct_snapshots_by_mu(
-    const std::vector<float>& waters,
-    std::size_t n_mu,
-    std::size_t n_snapshots,
-    std::size_t max_n_waters
-) {
+reconstruct_snapshots_by_mu(const WaterSnapshots& snapshots) {
     const std::size_t WATER_SIZE = (std::size_t)WATER_SIZE_LOCAL;
+    snapshots.validate();
 
-    std::vector<std::vector<std::vector<Atom>>> frames_by_mu(n_mu);
+    std::vector<std::vector<std::vector<Atom>>> frames_by_mu(snapshots.n_mu);
 
-    for (std::size_t mu_idx = 0; mu_idx < n_mu; ++mu_idx) {
-        frames_by_mu[mu_idx].reserve(n_snapshots);
+    for (std::size_t mu_idx = 0; mu_idx < snapshots.n_mu; ++mu_idx) {
+        frames_by_mu[mu_idx].reserve(snapshots.n_snapshots);
 
-        for (std::size_t snap_idx = 0; snap_idx < n_snapshots; ++snap_idx) {
-            const std::size_t snapshot_base =
-                (mu_idx * n_snapshots * max_n_waters * WATER_SIZE) +
-                (snap_idx * max_n_waters * WATER_SIZE);
+        for (std::size_t snap_idx = 0; snap_idx < snapshots.n_snapshots; ++snap_idx) {
+            const std::size_t n_waters = snapshots.n_waters(mu_idx, snap_idx);
+            const float* waters = snapshots.frame(mu_idx, snap_idx);
 
             std::vector<Atom> atoms_snapshot;
-            atoms_snapshot.reserve(max_n_waters * 3);
+            atoms_snapshot.reserve(n_waters * 3);
 
-            for (std::size_t water_idx = 0; water_idx < max_n_waters; ++water_idx) {
-                const std::size_t wat_index = snapshot_base + water_idx * WATER_SIZE;
-                if (wat_index + (WATER_SIZE - 1) >= waters.size()) break;
+            for (std::size_t water_idx = 0; water_idx < n_waters; ++water_idx) {
+                const std::size_t wat_index = water_idx * WATER_SIZE;
 
                 const double o_x = (double)waters[wat_index + 0];
                 const double o_y = (double)waters[wat_index + 1];
                 const double o_z = (double)waters[wat_index + 2];
-
-                // inactive slot
-                if (o_x == 0.0 && o_y == 0.0 && o_z == 0.0) continue;
 
                 const std::size_t o_res  = (std::size_t)waters[wat_index + 3];
                 const std::size_t h1_res = (std::size_t)waters[wat_index + 7];
@@ -207,19 +199,14 @@ inline void to_pdb(
     f << "TER\n";
 }
 
-inline void save_pdbs_by_mu_snapshot(
-    const std::vector<float>& snapshots_flat,
-    std::size_t n_mu,
-    std::size_t n_snapshots,
-    std::size_t max_n_waters,
-    const std::string& out_dir
-) {
+inline void save_pdbs_by_mu_snapshot(const WaterSnapshots& snapshots, const std::string& out_dir) {
     namespace fs = std::filesystem;
     fs::create_directories(out_dir);
 
-    auto frames = reconstruct_snapshots_by_mu(snapshots_flat, n_mu, n_snapshots, max_n_waters);
+    auto frames = reconstruct_snapshots_by_mu(snapshots);
+    const std::size_t n_snapshots = snapshots.n_snapshots;
 
-    for (std::size_t mu = 0; mu < n_mu; ++mu) {
+    for (std::size_t mu = 0; mu < snapshots.n_mu; ++mu) {
         // optional: per-mu folder
         std::ostringstream mu_dir;
         mu_dir << out_dir << "/mu_" << std::setw(3) << std::setfill('0') << mu;

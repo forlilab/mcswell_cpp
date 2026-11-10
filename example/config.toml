@@ -13,16 +13,21 @@ path=["example/5pti.cif"]
 
 
 [simulation_parameters]
-# These parameters were optimized with a grid search
 n_frames=1
 n_snapshots=2000
-n_gcmc_steps=50000000
-n_equilibration_steps=5000000
+# Long enough for the windows around bulk mu, where N decorrelates over ~10M
+# steps, and for the slowest windows up to mu = -4 to become stationary
+# (~15-25M steps with the default pre-filled start). Check n_waters_trace.png
+# and raise n_equilibration_steps if a window is flagged.
+n_gcmc_steps=100000000
+n_equilibration_steps=20000000
 distance_cutoff=9.0
 
 [mu_range]
+# Up to ~3 kcal/mol above bulk mu (-6.87 for TIP4P). Higher windows keep
+# compressing water past bulk density and do not equilibrate in a feasible run.
 start=-38.0
-stop=2.0
+stop=-4.0
 step=1.0
 
 [gci]

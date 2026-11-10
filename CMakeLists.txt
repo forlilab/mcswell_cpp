@@ -189,6 +189,7 @@ add_library(mcswell_analysis STATIC
     src/analysis/binomial_fit.cpp
     src/analysis/gci_fit.cpp
     src/analysis/writers.cpp
+    src/analysis/sampler_diagnostics.cpp
     src/analysis/pipeline_analysis.cpp
 )
 

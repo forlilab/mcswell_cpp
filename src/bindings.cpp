@@ -49,10 +49,59 @@ std::size_t n_points_from_boundaries(
     throw std::runtime_error("boundaries must be shape (N,3) or (3N,)");
 }
 
+// Hand the per-(mu, window) sampling trace to Python as plain arrays shaped
+// (n_mu, n_windows[, 3]), so callers can slice it by mu or by phase without
+// re-deriving the flat layout. Empty dict when diagnostics were switched off.
+py::dict diagnostics_to_dict(const mcswell::analysis::SamplerDiagnostics& diag) {
+    py::dict out;
+    if (diag.empty()) return out;
+
+    const auto n_mu = static_cast<py::ssize_t>(diag.n_mu);
+    const auto n_win = static_cast<py::ssize_t>(diag.n_windows);
+    const auto n_moves = static_cast<py::ssize_t>(mcswell::analysis::N_MOVE_TYPES);
+
+    const auto to_array = [](const auto& src, std::vector<py::ssize_t> shape) {
+        using value_type = typename std::decay_t<decltype(src)>::value_type;
+        py::array_t<value_type> arr(shape);
+        std::memcpy(arr.mutable_data(), src.data(), src.size() * sizeof(value_type));
+        return arr;
+    };
+
+    out["n_mu"] = diag.n_mu;
+    out["n_windows"] = diag.n_windows;
+    out["steps_per_window"] = diag.steps_per_window;
+    out["total_steps"] = diag.total_steps;
+    out["equilibration_steps"] = diag.equilibration_steps;
+    out["first_production_window"] = diag.first_production_window();
+    out["move_types"] = py::make_tuple("insertion", "deletion", "displacement");
+
+    out["proposed"] = to_array(diag.proposed, {n_mu, n_win, n_moves});
+    out["accepted"] = to_array(diag.accepted, {n_mu, n_win, n_moves});
+    out["capacity_blocked"] = to_array(diag.capacity_blocked, {n_mu, n_win});
+    out["n_waters_sum"] = to_array(diag.n_waters_sum, {n_mu, n_win});
+    out["n_waters_end"] = to_array(diag.n_waters_end, {n_mu, n_win});
+    out["energy_end"] = to_array(diag.energy_end, {n_mu, n_win});
+    return out;
+}
+
+
+// Rebuild the insertion lattice (points + occupancy mask) from the box spec.
+// The displacement constraint needs the mask, and regenerating it here keeps
+// it guaranteed consistent with the point list the caller passes in -- rather
+// than trusting two separately-built descriptions of the same lattice.
+InsertionGrid rebuild_cavity_grid(
+    const std::vector<Atom>& atoms, std::array<double, 3> box_center,
+    std::array<double, 3> box_halfsize, double spacing, double max_distance,
+    double min_distance) {
+    GridSpec g{{box_halfsize[0] * 2.0, box_halfsize[1] * 2.0, box_halfsize[2] * 2.0},
+               box_center, spacing};
+    return make_insertion_grid(atoms, g, max_distance, min_distance);
+}
+
 // Runs the GCMC titration only, with no post-simulation analysis -- kept
-// for debugging/advanced use. Returns the full in-memory snapshot buffer
-// (and the water-buffer sizing needed to index into it) rather than
-// writing anything to disk, unless dump_debug_pdbs is requested.
+// for debugging/advanced use. Returns every snapshot in memory, in the
+// compact WaterSnapshots layout, rather than writing anything to disk,
+// unless dump_debug_pdbs is requested.
 py::dict run_mcswell_py(
     const std::vector<Atom>& receptor_points,
     py::array_t<float, py::array::c_style | py::array::forcecast> boundaries_xyz, // (N,3) or (3N,)
@@ -64,24 +113,59 @@ py::dict run_mcswell_py(
     const std::vector<float>& mu_values,
     std::size_t n_snapshots,
     unsigned long long seed = 42ULL,
-    bool dump_debug_pdbs = false
+    bool dump_debug_pdbs = false,
+    std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
+    std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
+    bool constrain_displacement = true,
+    std::array<double, 3> box_center = {0.0, 0.0, 0.0},
+    std::array<double, 3> box_halfsize = {0.0, 0.0, 0.0},
+    double min_distance = 1.5,
+    std::size_t max_waters = 0,
+    std::size_t snapshot_buffer_bytes = DEFAULT_SNAPSHOT_BUFFER_BYTES,
+    double max_rotation_deg = DEFAULT_MAX_ROTATION_DEG,
+    double prefill_above_mu = NO_PREFILL
 ) {
     const std::size_t n_points = n_points_from_boundaries(boundaries_xyz);
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
 
+    InsertionGrid cavity;
+    const bool have_box = box_halfsize[0] > 0.0 || box_halfsize[1] > 0.0 || box_halfsize[2] > 0.0;
+    if (constrain_displacement && !have_box) {
+        // No box to rebuild the lattice from: the points define it.
+        cavity = insertion_grid_from_points(ptr, n_points, spacing);
+    } else if (constrain_displacement) {
+        cavity = rebuild_cavity_grid(receptor_points, box_center, box_halfsize, spacing,
+                                     distance_cutoff, min_distance);
+        if (cavity.n_points() != n_points) {
+            throw std::runtime_error(
+                "rebuilt cavity lattice has " + std::to_string(cavity.n_points()) +
+                " points but the supplied boundaries have " + std::to_string(n_points) +
+                "; box_center/box_halfsize/spacing/distance_cutoff must match the "
+                "call that built them");
+        }
+    }
+
     const auto result = run_mcswell_gpu_titration(
         receptor_points, ptr, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps, save_path,
-        mu_values, n_snapshots, seed, dump_debug_pdbs
+        mu_values, n_snapshots, seed, dump_debug_pdbs, n_diagnostic_windows, diagnostic_energy_stride,
+        constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters, snapshot_buffer_bytes,
+        max_rotation_deg, prefill_above_mu
     );
 
-    py::array_t<float> snapshots(static_cast<py::ssize_t>(result.snapshots.size()));
-    std::memcpy(snapshots.mutable_data(), result.snapshots.data(), result.snapshots.size() * sizeof(float));
+    const auto& snaps = result.snapshots;
+    py::array_t<std::uint64_t> offsets(static_cast<py::ssize_t>(snaps.offsets.size()));
+    std::memcpy(offsets.mutable_data(), snaps.offsets.data(), snaps.offsets.size() * sizeof(std::uint64_t));
+    py::array_t<float> waters({static_cast<py::ssize_t>(snaps.offsets.back()), static_cast<py::ssize_t>(WATER_SIZE)});
+    std::memcpy(waters.mutable_data(), snaps.waters.data(), snaps.waters.size() * sizeof(float));
 
     py::dict out;
-    out["snapshots"] = snapshots;
-    out["target_n_waters"] = result.target_n_waters;
+    out["offsets"] = offsets;
+    out["waters"] = waters;
+    out["max_waters"] = result.max_waters;
+    out["water_capacity"] = result.water_capacity;
     out["n_mu"] = mu_values.size();
     out["n_snapshots"] = n_snapshots;
+    out["diagnostics"] = diagnostics_to_dict(result.diagnostics);
     return out;
 }
 
@@ -109,7 +193,6 @@ py::dict run_mcswell_and_analyze_py(
     double peak_percentile = 90.0,
     double peak_merge_cutoff = 1.4,
     bool capacity_filter = true,
-    double bulk_water_density = 0.0334,
     double max_capacity_hit_fraction = 0.01,
     double max_mean_capacity_fraction = 0.90,
     double assignment_cutoff = 2.4,
@@ -120,10 +203,29 @@ py::dict run_mcswell_and_analyze_py(
     int random_starts = 64,
     unsigned long long fit_seed = 20260812ULL,
     unsigned long long seed = 12345ULL,
-    bool dump_debug_pdbs = false
+    bool dump_debug_pdbs = false,
+    std::size_t n_diagnostic_windows = DEFAULT_DIAGNOSTIC_WINDOWS,
+    std::size_t diagnostic_energy_stride = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
+    bool constrain_displacement = true,
+    double min_distance = 1.5,
+    std::size_t max_waters = 0,
+    double max_rotation_deg = DEFAULT_MAX_ROTATION_DEG,
+    double prefill_above_mu = NO_PREFILL
 ) {
     const std::size_t n_points = n_points_from_boundaries(boundaries_xyz);
     const float* ptr = static_cast<const float*>(boundaries_xyz.request().ptr);
+
+    InsertionGrid cavity;
+    if (constrain_displacement) {
+        cavity = rebuild_cavity_grid(receptor_points, box_center, box_halfsize, spacing,
+                                     distance_cutoff, min_distance);
+        if (cavity.n_points() != n_points) {
+            throw std::runtime_error(
+                "rebuilt cavity lattice has " + std::to_string(cavity.n_points()) +
+                " points but the supplied boundaries have " + std::to_string(n_points) +
+                "; box/spacing/cutoff must match the call that built them");
+        }
+    }
 
     mcswell::analysis::PostAnalysisConfig cfg;
     cfg.temperature = temperature;
@@ -135,7 +237,6 @@ py::dict run_mcswell_and_analyze_py(
     cfg.peak_percentile = peak_percentile;
     cfg.peak_merge_cutoff = peak_merge_cutoff;
     cfg.capacity_filter = capacity_filter;
-    cfg.bulk_water_density = bulk_water_density;
     cfg.max_capacity_hit_fraction = max_capacity_hit_fraction;
     cfg.max_mean_capacity_fraction = max_mean_capacity_fraction;
     cfg.assignment_cutoff = assignment_cutoff;
@@ -148,14 +249,20 @@ py::dict run_mcswell_and_analyze_py(
 
     const auto result = mcswell::run_mcswell_full_pipeline(
         receptor_points, ptr, n_points, distance_cutoff, spacing, gcmc_steps, equilibration_steps, save_path,
-        mu_values, n_snapshots, cfg, run_binomial, run_gci, seed, dump_debug_pdbs
+        mu_values, n_snapshots, cfg, run_binomial, run_gci, seed, dump_debug_pdbs, n_diagnostic_windows,
+        diagnostic_energy_stride, constrain_displacement ? &cavity : nullptr, constrain_displacement, max_waters,
+        DEFAULT_SNAPSHOT_BUFFER_BYTES, max_rotation_deg, prefill_above_mu
     );
 
     py::dict out;
     out["n_insertion_points"] = result.n_insertion_points;
     out["sampler_volume"] = result.sampler_volume;
+    out["max_waters"] = result.max_waters;
+    out["water_capacity"] = result.water_capacity;
     out["binomial_output_dir"] = result.binomial_output_dir;
     out["gci_output_dir"] = result.gci_output_dir;
+    out["acceptance_windows_csv"] = result.acceptance_windows_csv;
+    out["acceptance_summary_csv"] = result.acceptance_summary_csv;
     return out;
 }
 
@@ -246,11 +353,33 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("n_snapshots"),
       py::arg("seed") = 42ULL,
       py::arg("dump_debug_pdbs") = false,
+      py::arg("n_diagnostic_windows") = DEFAULT_DIAGNOSTIC_WINDOWS,
+      py::arg("diagnostic_energy_stride") = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
+      py::arg("constrain_displacement") = true,
+      py::arg("box_center") = std::array<double, 3>{0.0, 0.0, 0.0},
+      py::arg("box_halfsize") = std::array<double, 3>{0.0, 0.0, 0.0},
+      py::arg("min_distance") = 1.5,
+      py::arg("max_waters") = 0,
+      py::arg("snapshot_buffer_bytes") = DEFAULT_SNAPSHOT_BUFFER_BYTES,
+      py::arg("max_rotation_deg") = DEFAULT_MAX_ROTATION_DEG,
+      py::arg("prefill_above_mu") = NO_PREFILL,
       "Run the GCMC titration only (no post-simulation analysis). Returns "
-      "a dict with the full in-memory snapshot buffer ('snapshots'), plus "
-      "the sizing needed to index into it ('target_n_waters', 'n_mu', "
-      "'n_snapshots'). Nothing is written to disk unless dump_debug_pdbs "
-      "is set. Prefer run_mcswell_and_analyze for normal use.");
+      "a dict with every snapshot in memory as 'waters' (an (N, 12) float32 "
+      "array) and 'offsets' (n_mu * n_snapshots + 1 entries: frame "
+      "mu * n_snapshots + snap holds waters[offsets[f]:offsets[f+1]]), plus "
+      "'n_mu', 'n_snapshots', 'max_waters' (the enforced limit, 0 = none) and "
+      "'water_capacity' (the size the water buffer grew to), and the per-(mu, "
+      "window) sampling trace "
+      "('diagnostics': per-move proposed/accepted counts, capacity-blocked "
+      "insertions, mean and final water counts, and the water-subsystem "
+      "energy, as (n_mu, n_windows[, 3]) arrays). Set n_diagnostic_windows=0 "
+      "to switch the instrumentation off; it draws no random numbers, so "
+      "leaving it on does not perturb the chain. constrain_displacement "
+      "(default True) keeps displaced waters inside the sampled region; the "
+      "region is rebuilt from box_center/box_halfsize when given, otherwise "
+      "taken from the boundaries themselves. Nothing is written to disk "
+      "unless dump_debug_pdbs is set. Prefer run_mcswell_and_analyze for "
+      "normal use.");
 
     m.def("run_mcswell_and_analyze",
       &run_mcswell_and_analyze_py,
@@ -274,7 +403,6 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("peak_percentile") = 90.0,
       py::arg("peak_merge_cutoff") = 1.4,
       py::arg("capacity_filter") = true,
-      py::arg("bulk_water_density") = 0.0334,
       py::arg("max_capacity_hit_fraction") = 0.01,
       py::arg("max_mean_capacity_fraction") = 0.90,
       py::arg("assignment_cutoff") = 2.4,
@@ -286,11 +414,36 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("fit_seed") = 20260812ULL,
       py::arg("seed") = 12345ULL,
       py::arg("dump_debug_pdbs") = false,
+      py::arg("n_diagnostic_windows") = DEFAULT_DIAGNOSTIC_WINDOWS,
+      py::arg("diagnostic_energy_stride") = DEFAULT_DIAGNOSTIC_ENERGY_STRIDE,
+      py::arg("constrain_displacement") = true,
+      py::arg("min_distance") = 1.5,
+      py::arg("max_waters") = 0,
+      py::arg("max_rotation_deg") = DEFAULT_MAX_ROTATION_DEG,
+      py::arg("prefill_above_mu") = NO_PREFILL,
       "Run the GCMC titration and the requested post-simulation "
       "analyses (binomial site-occupancy fit and/or ProtoMS-style GCI) "
       "entirely in memory: no per-snapshot PDB is written to disk. "
       "Writes only the final result artifacts (sites.csv, sites.pdb, "
-      "titration CSVs, gO.dx, metadata JSON) under save_path/gci/. "
-      "Returns a dict with n_insertion_points, sampler_volume, "
-      "binomial_output_dir, gci_output_dir.");
+      "titration CSVs, gO.dx, metadata JSON) under save_path/gci/, plus "
+      "the sampling-diagnostics tables acceptance_windows.csv and "
+      "acceptance_summary.csv under save_path itself "
+      "(n_diagnostic_windows=0 disables those). "
+      "Returns a dict with n_insertion_points, sampler_volume, max_waters, "
+      "water_capacity, binomial_output_dir, gci_output_dir, "
+      "acceptance_windows_csv, acceptance_summary_csv.\n\n"
+      "constrain_displacement=True rejects displacement moves that would "
+      "carry a water out of the sampled region, so insertion and deletion "
+      "act on the same region (min_distance must match the value used to "
+      "build the boundaries). It is on by default: without it waters drift "
+      "out of the region (and the box), where insertion cannot reach them, "
+      "breaking detailed balance and inflating N.\n\n"
+      "The number of waters per window is unlimited by default: the water "
+      "buffer grows on demand. max_waters > 0 sets a hard limit (insertions "
+      "beyond it are refused and counted as capacity-blocked), and the "
+      "capacity filter then excludes windows that run into it.\n\n"
+      "max_rotation_deg caps the rotation a displacement move applies "
+      "(default 30). Windows with mu > prefill_above_mu start pre-filled at "
+      "bulk density instead of empty (default: none; pass -inf for all, and "
+      "compare with an all-empty run to check equilibration).");
 }

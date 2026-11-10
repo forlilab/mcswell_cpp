@@ -85,7 +85,7 @@ PostAnalysisConfig make_config() {
     cfg.peak_percentile = 90.0;
     cfg.peak_merge_cutoff = 1.4;
     cfg.capacity_filter = true;
-    cfg.bulk_water_density = 0.0334; // capacity = floor(1000*0.0334) = 33, well above the max count of 3
+    cfg.water_capacity = 33; // a max_waters limit well above the max count of 3
     cfg.assignment_cutoff = 2.4;
     cfg.local_radius = 1.4;
     cfg.random_starts = 16; // lighter than the production default (64) to keep this test fast
