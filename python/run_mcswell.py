@@ -27,6 +27,7 @@ import numpy as np
 import itertools
 import time
 import os
+import shutil
 from utils import *
 import tomllib
 import estimate_free_energies as fe
@@ -101,7 +102,7 @@ def _build_box(positions, padding=2*openmmunit.angstrom):
         return vectors
 
 
-def fix_pdb(pdbfile: str, pdbxfile: str, keep_heterogens: bool=False):
+def fix_pdb(pdbfile: str, pdbxfile: str, keep_heterogens: bool=False, keep_ions=()):
     """Fixes common problems in PDB such as:
             - missing atoms
             - missing residues
@@ -114,10 +115,29 @@ def fix_pdb(pdbfile: str, pdbxfile: str, keep_heterogens: bool=False):
     :type pdbxfile: str
     :param keep_heterogens: if False all heterogen atoms but waters are deleted, defaults to False
     :type keep_heterogens: bool, optional
+    :param keep_ions: residue names of single-atom ions to keep when heterogens
+        are deleted (e.g. ["CA"] for a structural calcium). They need a template
+        in the protein force field (amber14/tip3p.xml has the common ions).
+    :type keep_ions: list[str], optional
     :return: new topology and positions
     :rtype: tuple[Topology, list]
     """
     fixer = pdbfixer.PDBFixer(pdbfile=pdbfile, pdbxfile=pdbxfile)
+    # removeHeterogens drops every ion, so set the ones to keep aside and add
+    # them back once the protein is fixed (they carry no hydrogens to add).
+    keep_ions = {name.upper() for name in keep_ions or ()}
+    ions = []
+    if keep_ions and not keep_heterogens:
+        for residue in fixer.topology.residues():
+            if residue.name.upper() in keep_ions:
+                atoms = list(residue.atoms())
+                if len(atoms) != 1:
+                    raise ValueError(f"keep_ions: residue {residue.name} {residue.id} has "
+                                     f"{len(atoms)} atoms, expected a single-atom ion")
+                ions.append((residue.name, atoms[0], fixer.positions[atoms[0].index]))
+        missing = keep_ions - {name.upper() for name, _, _ in ions}
+        if missing:
+            raise ValueError(f"keep_ions: no {', '.join(sorted(missing))} in the receptor")
     fixer.findMissingResidues()
     
     chains = list(fixer.topology.chains())
@@ -130,16 +150,28 @@ def fix_pdb(pdbfile: str, pdbxfile: str, keep_heterogens: bool=False):
     if not keep_heterogens:
         fixer.removeHeterogens(keepWater=False)
 
-    fixer.findMissingAtoms() 
+    fixer.findMissingAtoms()
     fixer.addMissingAtoms()
     fixer.addMissingHydrogens(7)
-    return fixer.topology, fixer.positions
+    if not ions:
+        return fixer.topology, fixer.positions
+
+    modeller = Modeller(fixer.topology, fixer.positions)
+    ion_topology = Topology()
+    ion_chain = ion_topology.addChain()
+    for name, atom, _ in ions:
+        ion_topology.addAtom(atom.name, atom.element, ion_topology.addResidue(name, ion_chain))
+    modeller.add(ion_topology, [position for _, _, position in ions])
+    return modeller.topology, modeller.positions
 
 def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml",
         "amber14/tip3p.xml", "implicit/gbn2.xml"], minimize=False,
-        minimize_max_iterations=500, platform_name=DEFAULT_OPENMM_PLATFORM):
+        minimize_max_iterations=500, platform_name=DEFAULT_OPENMM_PLATFORM, keep_ions=()):
     """Turns receptor PDBs into the Atom list the sampler scores against.
 
+    :param keep_ions: residue names of single-atom ions in the receptor to keep
+        (e.g. ["CA"]); every other heterogen is deleted
+    :type keep_ions: list[str], optional
     :param minimize: run an energy minimization on the prepped structure before
         reading off the coordinates. Off by default: input structures are
         assumed to be already equilibrated.
@@ -163,7 +195,8 @@ def characterize_receptor(receptors, project_path, protein_ff=["amber14-all.xml"
             pdbfile = pdb_string
         else:
             pdbxfile = pdb_string
-        protein_topology, protein_positions = fix_pdb(pdbfile, pdbxfile, keep_heterogens=False)
+        protein_topology, protein_positions = fix_pdb(pdbfile, pdbxfile, keep_heterogens=False,
+                                                      keep_ions=keep_ions)
         protein_topology.createStandardBonds()
         protein_modeller = Modeller(protein_topology, protein_positions)
         # Clean the receptor (to add an option to delete or not the water)
@@ -329,7 +362,7 @@ def characterize_small_molecule(small_molecules, small_molecule_forcefield, prot
 
 def get_data_from_openmm(receptors, project_path, small_molecules=None, small_molecule_forcefield=None,
                          minimize=False, minimize_max_iterations=500,
-                         platform_name=DEFAULT_OPENMM_PLATFORM):
+                         platform_name=DEFAULT_OPENMM_PLATFORM, keep_ions=()):
     mcswell_atoms = list()
     if small_molecules is not None:
         print("Parametrizing small molecule..")
@@ -340,7 +373,7 @@ def get_data_from_openmm(receptors, project_path, small_molecules=None, small_mo
         print("Parametrizing receptor..")
         atoms_receptor = characterize_receptor(receptors, project_path, minimize=minimize,
                                                minimize_max_iterations=minimize_max_iterations,
-                                               platform_name=platform_name)
+                                               platform_name=platform_name, keep_ions=keep_ions)
         for atom in atoms_receptor:
             mcswell_atoms.append(atom)
     return mcswell_atoms
@@ -358,18 +391,24 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def prepared_system_inputs(receptors, small_molecules, small_molecule_forcefield, minimize):
+def prepared_system_inputs(receptors, small_molecules, small_molecule_forcefield, minimize,
+                           keep_ions=()):
     """Everything the OpenMM prep depends on, to check a prepared system against a config.
 
     Files are identified by content, not path, so a system prepared on one
     machine can be used on another where the inputs live somewhere else.
+    keep_ions is only recorded when set, so systems prepared before the option
+    existed still match configs that don't use it.
     """
-    return {
+    inputs = {
         "receptor_sha256": [_sha256(p) for p in receptors or []],
         "ligand_sha256": [_sha256(p) for p in small_molecules or []],
         "ligand_forcefield": small_molecule_forcefield,
         "minimize": bool(minimize),
     }
+    if keep_ions:
+        inputs["keep_ions"] = sorted(name.upper() for name in keep_ions)
+    return inputs
 
 
 def save_prepared_system(path, atoms, cleaned_pdb, inputs, sources):
@@ -389,6 +428,56 @@ def save_prepared_system(path, atoms, cleaned_pdb, inputs, sources):
     with open(tmp, "w") as fo:
         json.dump(data, fo)
     os.replace(tmp, path)
+
+
+# Nonbonded parameters of the sampled water, the same as water_model::* in
+# include/cuda/water_model.cuh: (rmin_half, epsilon, charge) per site, and for
+# TIP4P the O-M distance. TIP4P carries its negative charge on the M site.
+FIXED_WATER_PARAMS = {
+    "TIP3P": {"O": (1.7682, 0.15210325, -0.834), "H": (0.0, 0.0, 0.417)},
+    "TIP4P": {"O": (1.7698915, 0.1550, 0.0), "H": (0.0, 0.0, 0.520), "M": (0.0, 0.0, -1.040)},
+}
+TIP4P_DOM = 0.15
+
+
+def load_fixed_waters(path):
+    """Waters held fixed during the titration (e.g. crystal waters), as receptor atoms.
+
+    path is a PDB whose HOH/WAT residues each have O, H1 and H2 with the
+    hydrogens already placed: the waters are not moved or reoriented. They get
+    the parameters of the water model the extension was compiled with (for
+    TIP4P, the M site is placed on the H-O-H bisector).
+    """
+    model = detect_compiled_water_model()
+    if model not in FIXED_WATER_PARAMS:
+        raise ValueError(f"receptor.fixed_waters: no parameters for the water model {model}")
+    params = FIXED_WATER_PARAMS[model]
+    residues = {}
+    with open(path) as fi:
+        for line in fi:
+            if line.startswith(("ATOM", "HETATM")) and line[17:20].strip() in ("HOH", "WAT"):
+                key = (line[21], line[22:27].strip())
+                name = line[12:16].strip()
+                if name in residues.get(key, {}):
+                    raise ValueError(f"{path}: two waters numbered {key[0]}:{key[1]}")
+                residues.setdefault(key, {})[name] = np.array(
+                    [float(line[30:38]), float(line[38:46]), float(line[46:54])])
+    atoms = []
+    for (chain, resnum), names in residues.items():
+        if set(names) != {"O", "H1", "H2"}:
+            raise ValueError(f"{path}: water {chain}:{resnum} has atoms {sorted(names)}, "
+                             "expected O, H1, H2")
+        sites = [("O", "OW", names["O"]), ("H1", "HW", names["H1"]), ("H2", "HW", names["H2"])]
+        if "M" in params:
+            bisector = (names["H1"] - names["O"]) + (names["H2"] - names["O"])
+            sites.append(("M", "MW", names["O"] + TIP4P_DOM * bisector / np.linalg.norm(bisector)))
+        for name, atom_type, xyz in sites:
+            rmin_half_value, epsilon_value, charge_value = params[name[0]]
+            atoms.append(mc.Atom(atom_type, f"{chain}:FIX:{resnum}:{name}", [float(c) for c in xyz],
+                                 rmin_half_value, epsilon_value, charge_value))
+    if not atoms:
+        raise ValueError(f"{path}: no HOH/WAT residues")
+    return atoms
 
 
 def load_prepared_system(path, inputs):
@@ -423,8 +512,17 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
 
     #receptor
     receptor_path = None
+    keep_ions = []
+    fixed_waters = None
     if "receptor" in config:
-        receptor_path = config["receptor"]["path"]
+        # Optional: a [receptor] table may hold only fixed_waters (e.g. a pure-water box).
+        receptor_path = config["receptor"].get("path")
+        # Single-atom ions to keep in the receptor (e.g. ["CA"] for a structural
+        # calcium); every other heterogen is removed during the prep.
+        keep_ions = list(config["receptor"].get("keep_ions", []))
+        # Waters held fixed during the titration (PDB with O, H1, H2), added to
+        # the receptor atoms after the prep, so the prepared system is unchanged.
+        fixed_waters = config["receptor"].get("fixed_waters")
         print(receptor_path)
 
     #ligand
@@ -493,7 +591,8 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
     y_size = config["simulation_box"]["y_size"]
     z_size = config["simulation_box"]["z_size"]
 
-    prep_inputs = prepared_system_inputs(receptor_path, small_molecule_path, small_molecule_ff, minimize)
+    prep_inputs = prepared_system_inputs(receptor_path, small_molecule_path, small_molecule_ff, minimize,
+                                         keep_ions)
     if prepared_system and not prepare_only:
         if not os.path.exists(prepared_system):
             raise FileNotFoundError(
@@ -516,7 +615,8 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
                 small_molecule_forcefield=small_molecule_ff,
                 minimize=minimize,
                 minimize_max_iterations=minimize_max_iterations,
-                platform_name=openmm_platform,)
+                platform_name=openmm_platform,
+                keep_ions=keep_ions)
             cleaned = os.path.join(prep_dir, "system_cleaned.pdb")
             cleaned_pdb = open(cleaned).read() if os.path.exists(cleaned) else None
         if prepare_only:
@@ -524,6 +624,13 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
                                  {"receptor": receptor_path, "ligand": small_molecule_path})
             print(f"Wrote the prepared system ({len(parametrized_atoms)} atoms) to {prepared_system}")
             return None
+
+    if fixed_waters:
+        water_atoms = load_fixed_waters(fixed_waters)
+        parametrized_atoms = list(parametrized_atoms) + water_atoms
+        n_sites = 4 if detect_compiled_water_model() == "TIP4P" else 3
+        print(f"Added {len(water_atoms) // n_sites} fixed waters from {fixed_waters}")
+        shutil.copy(fixed_waters, f"{project_path}/fixed_waters.pdb")
 
     save_box_corners_pdb([center_x, center_y, center_z], [x_size, y_size, z_size], outfile=f"{project_path}/box.pdb")
 
@@ -621,12 +728,13 @@ def build_parser():
     parser.add_argument(
         "--energy-estimation-method",
         dest="energy_estimation_method",
-        choices=("gci", "binomial", "both"),
+        choices=("gci", "binomial", "both", "none"),
         default="both",
         help=(
             "Free-energy post-processing method to run: 'gci' (ProtoMS-style "
             "Grand Canonical Integration), 'binomial' (independent-site "
-            "binomial MLE occupancy fit), or 'both' (default: runs both)."
+            "binomial MLE occupancy fit), 'both' (default: runs both), or "
+            "'none' (titration and acceptance diagnostics only, e.g. a pure-water box)."
         ),
     )
     parser.add_argument(

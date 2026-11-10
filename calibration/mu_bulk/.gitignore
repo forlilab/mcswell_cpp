@@ -1,0 +1,6 @@
+shells/
+configs/
+tasks.txt
+runs/
+logs/
+__pycache__/

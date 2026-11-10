@@ -248,8 +248,21 @@ Omit this section for ligand-only hydration.
 | Key | Req | Type | Constraints | Example |
 |-----|:---:|------|-------------|---------|
 | `receptor.path` | ✓* | array[string] | ≥1 file; `.pdb`, `.cif`, `.mmcif` | `["3std_monomer_clean.pdb"]` |
+| `receptor.keep_ions` |  | array[string] | residue names of single-atom ions | `["CA"]` |
+| `receptor.fixed_waters` |  | string | `.pdb` with HOH/WAT residues (O, H1, H2) | `"crystal_waters.pdb"` |
 
-\* Required **only if** `[receptor]` section is present.
+\* Required if `[receptor]` is present, unless it holds `fixed_waters`.
+
+The prep deletes every heterogen in the receptor. `keep_ions` keeps the
+single-atom ions named (e.g. a structural calcium); they need a template in
+the protein force field (`amber14/tip3p.xml` has the common ions).
+
+`fixed_waters` adds waters that stay where they are during the titration
+(e.g. crystal waters) to the receptor atoms, after the prep. Their hydrogens
+must already be placed; they get the parameters of the compiled water model
+(for TIP4P, the M site is put on the H–O–H bisector). A `[receptor]` with only
+`fixed_waters` hydrates a region of pure water, as in the μ_bulk calibration
+(`calibration/mu_bulk/`).
 
 ### `[ligand]` (optional)
 
@@ -346,7 +359,7 @@ for the energy.
 | `mu_range.stop` | ✓ | float | `> start` | `-4.0` |
 | `mu_range.step` | ✓ | float | > 0 | `1.0` |
 
-Going much above bulk µ (−6.87 kcal/mol for TIP4P, −6.09 for TIP3P) buys
+Going much above bulk µ (−6.09 kcal/mol for TIP4P, −6.30 for TIP3P) buys
 little: past roughly bulk + 3 the region keeps compressing water beyond bulk
 density and does not equilibrate in a feasible run, and those densest windows
 also set the run's wall time.
@@ -373,7 +386,7 @@ Every key has a default, so the whole section may be omitted.
 | Key | Req | Type | Constraints | Example |
 |-----|:---:|------|-------------|---------|
 | `gci.peak_percentile` |  | float | 0 < value ≤ 100, default `90.0` | `90.0` |
-| `gci.mu_bulk` |  | float | kcal/mol | `-6.09` |
+| `gci.mu_bulk` |  | float | kcal/mol | `-6.30` |
 | `gci.temperature` |  | float | K, default `300.0` | `300.0` |
 | `gci.capacity_filter` |  | bool | default `true`; only acts with `max_waters` set | `true` |
 | `gci.max_capacity_hit_fraction` |  | float | 0–1, default `0.01` | `0.01` |
@@ -385,10 +398,17 @@ Every key has a default, so the whole section may be omitted.
 | `gci.random_starts` |  | int | default `64` | `64` |
 | `gci.seed` |  | int | fit RNG seed, default `20260812` | `20260812` |
 
-`gci.mu_bulk` is optional: if omitted, it's auto-selected from the
-compiled water model's published literature value (with a loud warning
--- see `utils.MU_BULK_BY_WATER_MODEL`), since that value was fit with a
-different energy function/cutoff than MCSwell's own sampler.
+`gci.mu_bulk` is the excess chemical potential of bulk water, the reference
+of every ΔG_bind (ΔG_bind = μ½ − μ_bulk). If omitted, it's the value
+calibrated with MCSwell's own energy function for the compiled water model:
+−6.30 ± 0.05 kcal/mol for TIP3P and −6.09 ± 0.07 for TIP4P
+(`utils.MU_BULK_BY_WATER_MODEL`; method and results in
+[`calibration/mu_bulk/`](calibration/mu_bulk/README.md)). The published values
+(TIP3P −6.09, TIP4P −6.87; Mahoney & Jorgensen 2000) were computed with
+periodic boundaries and Ewald sums and don't apply to MCSwell's Hamiltonian.
+μ_bulk only shifts every ΔG by the same amount, so results computed with
+another value are re-referenced without a rerun:
+ΔG_new = ΔG_old + μ_bulk,old − μ_bulk,new.
 
 ### `[simulation_box]`
 
@@ -406,7 +426,7 @@ different energy function/cutoff than MCSwell's own sampler.
 
 | Rule |
 |------|
-| At least one of `[receptor]` or `[ligand]` must be present |
+| At least one of `[receptor]` (with `path` or `fixed_waters`) or `[ligand]` must be present |
 | `[receptor]` and `[ligand]` may both be present |
 | `n_gcmc_steps >= n_equilibration_steps` |
 | `mu_range.start < mu_range.stop` |
@@ -432,7 +452,7 @@ Or run the provided example:
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--config` | — | Path to the TOML config file (required) |
-| `--energy-estimation-method` | `both` | `gci`, `binomial`, or `both` |
+| `--energy-estimation-method` | `both` | `gci`, `binomial`, `both`, or `none` (titration and acceptance diagnostics only) |
 | `--minimize` / `--no-minimize` | from `[openmm]` | Energy-minimize the prepped receptor, or skip it |
 | `--openmm-platform` | from `[openmm]` | Platform for the prep step (`auto`, `CUDA`, `OpenCL`, `CPU`, `Reference`) |
 | `--prepare-only` | off | Only run the OpenMM prep, write it to `io.prepared_system`, and stop |

@@ -24,7 +24,7 @@ n_equilibration_steps=20000000
 distance_cutoff=9.0
 
 [mu_range]
-# Up to ~3 kcal/mol above bulk mu (-6.87 for TIP4P). Higher windows keep
+# Up to ~3 kcal/mol above bulk mu (-6.09 for TIP4P, -6.30 for TIP3P). Higher windows keep
 # compressing water past bulk density and do not equilibrate in a feasible run.
 start=-38.0
 stop=-4.0
