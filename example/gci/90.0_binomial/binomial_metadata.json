@@ -1,0 +1,18 @@
+{
+  "method": "capacity-safe bounded independent-site binomial MLE",
+  "temperature_K": 300,
+  "bulk_mu_kcal_mol": -6.87,
+  "assignment_cutoff_A": 2.4,
+  "peak_percentile": 90,
+  "sampler_volume_A3": 8733.181640625,
+  "n_insertion_points": 165607,
+  "max_waters": 0,
+  "capacity_filter_enabled": true,
+  "max_capacity_hit_fraction": 0.01,
+  "max_mean_capacity_fraction": 0.9,
+  "n_sampled_mu_windows": 35,
+  "n_capacity_safe_mu_windows": 35,
+  "nearest_bulk_mu_kcal_mol": -7,
+  "n_detected_sites": 157,
+  "n_usable_sites": 157
+}
