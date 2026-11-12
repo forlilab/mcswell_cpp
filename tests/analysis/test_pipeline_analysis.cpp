@@ -81,9 +81,9 @@ PostAnalysisConfig make_config() {
     cfg.box_center = {0.0, 0.0, 0.0};
     cfg.box_halfsize = {5.0, 5.0, 5.0};
     cfg.grid_spacing = 0.5;
-    cfg.grid_sigma = 1.0;
+    cfg.smoothing_sigma = 0.5; // 1 voxel
     cfg.peak_percentile = 90.0;
-    cfg.peak_merge_cutoff = 1.4;
+    cfg.min_site_separation = 2.5;
     cfg.capacity_filter = true;
     cfg.water_capacity = 33; // a max_waters limit well above the max count of 3
     cfg.assignment_cutoff = 2.4;

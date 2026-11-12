@@ -15,10 +15,10 @@
 //  License along with this library; if not, write to the Free Software
 //  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
-// Ground-truth values in this file (gaussian_filter, percentile,
-// maximum_filter-based peak detection) were generated with the real
-// scipy/numpy in the `mcswell` environment, not hand-derived -- see the
-// generator scripts referenced in the port's development notes. This
+// Ground-truth values in this file (gaussian_filter, percentile, and the
+// hydration-site finder, from WaterKit's own _hydration_sites loop) were
+// generated with the real scipy/numpy in the `mcswell` environment, not
+// hand-derived. This
 // catches boundary-condition/normalization bugs that hand arithmetic
 // would likely get subtly wrong.
 
@@ -26,13 +26,14 @@
 #include "harness.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <stdexcept>
 
 using mcswell::analysis::compute_density_grid;
 using mcswell::analysis::DensityGrid;
-using mcswell::analysis::find_peaks;
+using mcswell::analysis::find_hydration_sites;
 using mcswell::analysis::gaussian_smooth;
 using mcswell::analysis::make_edges;
-using mcswell::analysis::merge_close_sites;
 using mcswell::analysis::Peak;
 
 namespace {
@@ -106,79 +107,104 @@ void test_gaussian_smooth_1d_reflect() {
     }
 }
 
-void test_find_peaks_matches_scipy() {
-    // 4x4x4 grid on a unit-spacing box centered at the origin: edges =
-    // [-2,-1,0,1,2] per axis, so bin(i,j,k)'s center is (i-1.5, j-1.5, k-1.5).
-    auto edges = make_edges({0.0, 0.0, 0.0}, {2.0, 2.0, 2.0}, 1.0);
-
+void test_find_hydration_sites_matches_waterkit() {
+    // 6x6x6 grid, 0.5 A voxels, centres -1.25 ... 1.25 per axis. Random
+    // distinct densities (about 20% zero), 60th percentile, 1.2 A separation.
+    // Expected sites from WaterKit's _hydration_sites loop (cdist-based) on
+    // the same voxel centres and values.
+    auto edges = make_edges({0.0, 0.0, 0.0}, {1.5, 1.5, 1.5}, 0.5);
     DensityGrid grid;
-    grid.shape = {4, 4, 4};
+    grid.shape = {6, 6, 6};
     grid.edges = edges;
     grid.values = {
-        0.0, 6.0, 5.0, 0.0, 9.0, 2.0, 2.0, 0.0, 3.0, 0.0, 3.0, 8.0, 4.0, 9.0, 4.0, 2.0,
-        7.0, 8.0, 8.0, 8.0, 0.0, 5.0, 2.0, 2.0, 2.0, 8.0, 7.0, 2.0, 4.0, 7.0, 0.0, 6.0,
-        4.0, 9.0, 7.0, 2.0, 8.0, 7.0, 2.0, 5.0, 7.0, 2.0, 2.0, 0.0, 0.0, 4.0, 0.0, 5.0,
-        4.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.0, 7.0, 2.0, 9.0, 0.0, 6.0, 5.0, 9.0, 6.0, 8.0,
+        62.51, 89.721, 0.0, 22.521, 30.017, 0.0, 0.527, 82.123, 79.707, 0.0, 30.303, 27.843,
+        25.487, 44.508, 50.455, 55.35, 99.55, 79.266, 0.0, 0.0, 21.531, 16.021, 61.254, 4.394,
+        3.568, 51.489, 46.621, 91.717, 0.0, 51.412, 0.0, 24.751, 1.179, 19.24, 69.203, 20.061,
+        36.954, 0.373, 83.005, 15.446, 0.0, 88.033, 50.979, 84.715, 0.0, 74.177, 0.0, 0.0,
+        0.0, 0.0, 36.126, 59.818, 5.925, 38.763, 32.304, 0.0, 81.634, 37.945, 97.875, 58.999,
+        0.0, 63.8, 67.645, 15.079, 44.031, 23.956, 0.0, 9.67, 96.783, 0.0, 67.177, 30.042,
+        87.408, 66.221, 0.0, 0.0, 94.495, 90.392, 56.972, 14.546, 19.246, 92.791, 55.233, 18.055,
+        88.406, 0.0, 56.969, 37.629, 41.096, 23.949, 3.806, 87.622, 0.0, 54.764, 32.216, 75.132,
+        2.52, 37.219, 3.035, 12.289, 96.715, 65.776, 0.0, 52.374, 87.281, 0.0, 59.029, 68.368,
+        35.541, 0.0, 0.0, 90.918, 0.0, 0.0, 0.518, 75.298, 81.053, 0.0, 41.89, 81.526,
+        1.427, 0.0, 79.302, 0.0, 72.585, 22.642, 19.852, 36.313, 0.0, 34.606, 94.812, 57.333,
+        34.007, 27.152, 95.204, 0.0, 0.0, 51.552, 0.0, 0.0, 74.277, 58.065, 0.0, 87.819,
+        41.165, 92.276, 6.872, 43.0, 51.951, 95.094, 25.1, 80.604, 67.647, 0.0, 0.0, 0.0,
+        33.268, 39.828, 20.291, 5.07, 21.291, 91.546, 84.017, 11.241, 0.0, 47.92, 59.468, 0.0,
+        30.666, 96.135, 46.584, 62.81, 63.523, 18.389, 6.187, 41.152, 76.403, 81.522, 72.999, 0.0,
+        91.335, 0.0, 87.769, 52.33, 91.564, 4.665, 0.0, 2.022, 0.0, 24.857, 18.75, 56.706,
+        3.899, 59.039, 16.601, 67.787, 2.108, 31.057, 93.834, 53.84, 81.159, 65.803, 61.075, 19.125,
+        57.439, 3.969, 0.0, 96.007, 0.0, 5.071, 33.866, 31.8, 11.272, 62.661, 79.746, 0.0
     };
 
-    auto peaks = find_peaks(grid, /*percentile=*/90.0, /*neighborhood=*/1);
+    auto sites = find_hydration_sites(grid, /*percentile=*/60.0, /*min_separation=*/1.2);
 
-    // Ground truth from a scipy implementation of the same algorithm
-    // (percentile threshold + maximum_filter(footprint=ones(3,3,3),
-    // mode='nearest') + peak_mask), grid indices (i,j,k) -> center/score.
     std::vector<Peak> expected;
-    auto add = [&](double i, double j, double k, double score) {
-        Peak p;
-        p.center = {i - 1.5, j - 1.5, k - 1.5};
-        p.score = score;
-        expected.push_back(p);
-    };
-    add(0, 1, 0, 9.0);
-    add(0, 3, 1, 9.0);
-    add(2, 0, 1, 9.0);
-    add(3, 2, 1, 9.0);
-    add(3, 3, 1, 9.0);
+    auto add = [&](double x, double y, double z, double score) { expected.push_back({{x, y, z}, score}); };
+    add(-1.25, -0.25, 0.75, 99.55);
+    add(-0.75, 1.25, -0.25, 96.783);
+    add(-0.25, 0.75, 0.75, 96.715);
+    add(0.75, 0.75, -0.75, 96.135);
+    add(0.75, -1.25, 1.25, 95.094);
+    add(-0.25, -0.75, 0.25, 92.791);
+    add(0.75, -1.25, -0.75, 92.276);
+    add(-1.25, -1.25, -0.75, 89.721);
+    add(-0.25, -0.25, -1.25, 88.406);
+    add(-0.75, -1.25, 1.25, 88.033);
+    add(1.25, 1.25, 0.75, 79.746);
+    add(1.25, -0.25, 0.25, 67.787);
 
-    MCSWELL_CHECK(peaks.size() == expected.size());
-    for (const auto& e : expected) {
-        bool found = false;
-        for (const auto& p : peaks) {
-            if (std::abs(p.center[0] - e.center[0]) < 1e-9 &&
-                std::abs(p.center[1] - e.center[1]) < 1e-9 &&
-                std::abs(p.center[2] - e.center[2]) < 1e-9 &&
-                std::abs(p.score - e.score) < 1e-9) {
-                found = true;
-                break;
-            }
-        }
-        MCSWELL_CHECK(found);
+    // Same sites, same (decreasing-score) order.
+    MCSWELL_CHECK(sites.size() == expected.size());
+    for (std::size_t i = 0; i < std::min(sites.size(), expected.size()); ++i) {
+        for (std::size_t d = 0; d < 3; ++d) MCSWELL_CHECK_NEAR(sites[i].center[d], expected[i].center[d], 1e-9);
+        MCSWELL_CHECK_NEAR(sites[i].score, expected[i].score, 1e-9);
     }
 }
 
-void test_merge_close_sites() {
-    std::vector<Peak> peaks;
-    // Two peaks close together (should merge into their weighted centroid)
-    // and one far-away singleton (should pass through unchanged).
-    peaks.push_back({{0.0, 0.0, 0.0}, 1.0});
-    peaks.push_back({{1.0, 0.0, 0.0}, 3.0}); // weight 3x the first
-    peaks.push_back({{100.0, 0.0, 0.0}, 5.0});
+void test_find_hydration_sites_separation() {
+    // 1D row of 13 voxels (0.5 A), densities rising to a maximum at index 6.
+    // With a 1.0 A separation the exclusion is inclusive: voxels exactly
+    // 1.0 A from a site are dropped, so sites sit 1.5 A apart.
+    DensityGrid grid;
+    grid.shape = {13, 1, 1};
+    for (int i = 0; i <= 13; ++i) grid.edges[0].push_back(0.5 * i);
+    grid.edges[1] = {0.0, 0.5};
+    grid.edges[2] = {0.0, 0.5};
+    for (int i = 0; i < 13; ++i) grid.values.push_back(10.0 - std::abs(i - 6));
 
-    auto merged = merge_close_sites(peaks, /*cutoff=*/1.5);
-    MCSWELL_CHECK(merged.size() == 2);
-
-    bool found_pair = false, found_singleton = false;
-    for (const auto& m : merged) {
-        if (std::abs(m.score - 5.0) < 1e-9 && std::abs(m.center[0] - 100.0) < 1e-9) {
-            found_singleton = true;
-        }
-        if (std::abs(m.score - 4.0) < 1e-9) {
-            // Weighted centroid: (0*1 + 1*3) / 4 = 0.75
-            MCSWELL_CHECK_NEAR(m.center[0], 0.75, 1e-9);
-            found_pair = true;
+    auto sites = find_hydration_sites(grid, /*percentile=*/0.0, /*min_separation=*/1.0);
+    // Site voxel indices 6, then 3 and 9 (equal density: lower index first), then 0 and 12.
+    const std::vector<double> expected_x = {3.25, 1.75, 4.75, 0.25, 6.25};
+    MCSWELL_CHECK(sites.size() == expected_x.size());
+    for (std::size_t i = 0; i < std::min(sites.size(), expected_x.size()); ++i) {
+        MCSWELL_CHECK_NEAR(sites[i].center[0], expected_x[i], 1e-12);
+    }
+    for (std::size_t a = 0; a < sites.size(); ++a) {
+        for (std::size_t b = a + 1; b < sites.size(); ++b) {
+            MCSWELL_CHECK(std::abs(sites[a].center[0] - sites[b].center[0]) > 1.0);
         }
     }
-    MCSWELL_CHECK(found_pair);
-    MCSWELL_CHECK(found_singleton);
+
+    // A percentile threshold drops the low-density tails before the search.
+    auto top = find_hydration_sites(grid, /*percentile=*/50.0, /*min_separation=*/1.0);
+    MCSWELL_CHECK(top.size() == 3); // indices 6, 3, 9 (densities 10, 7, 7); 0 and 12 (4) are below threshold
+}
+
+void test_find_hydration_sites_rejects_bad_input() {
+    DensityGrid grid;
+    grid.shape = {2, 1, 1};
+    grid.edges[0] = {0.0, 0.5, 1.0};
+    grid.edges[1] = {0.0, 0.5};
+    grid.edges[2] = {0.0, 0.5};
+    grid.values = {0.0, 0.0};
+    bool threw = false;
+    try { find_hydration_sites(grid, 90.0, 2.5); } catch (const std::runtime_error&) { threw = true; }
+    MCSWELL_CHECK(threw); // no density at all
+    grid.values = {1.0, 2.0};
+    threw = false;
+    try { find_hydration_sites(grid, 90.0, 0.0); } catch (const std::invalid_argument&) { threw = true; }
+    MCSWELL_CHECK(threw);
 }
 
 } // namespace
@@ -188,6 +214,7 @@ void run_density_grid_tests() {
     test_make_edges_not_evenly_divisible();
     test_compute_density_grid_binning();
     test_gaussian_smooth_1d_reflect();
-    test_find_peaks_matches_scipy();
-    test_merge_close_sites();
+    test_find_hydration_sites_matches_waterkit();
+    test_find_hydration_sites_separation();
+    test_find_hydration_sites_rejects_bad_input();
 }

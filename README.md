@@ -490,6 +490,19 @@ writes only the final result artifacts:
     gci_metadata.json, region_titration.png, local_titration_curves.png
 ```
 
+#### Hydration sites
+
+Both analyses share one set of sites, found on the water-oxygen density
+pooled over the capacity-safe µ windows. The density is binned on a 0.375 Å
+grid and smoothed with a 0.7 Å Gaussian. Voxels at or above the
+`gci.peak_percentile` of the non-zero density are candidates. The densest
+candidate becomes a site, every candidate within 2.5 Å of it is discarded,
+and this repeats until none is left (the greedy finder of WaterKit's
+`HydrationSites`). Sites are therefore more than 2.5 Å apart and can be
+placed as explicit waters without clashes. `gO.dx` is the smoothed density
+the sites were found on; the metadata JSONs record the grid spacing,
+smoothing width and minimum separation.
+
 #### Sampling diagnostics
 
 `acceptance_summary.csv` has one row per (µ, phase) with phase in

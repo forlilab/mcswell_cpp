@@ -188,10 +188,10 @@ py::dict run_mcswell_and_analyze_py(
     std::array<double, 3> box_halfsize,
     bool run_binomial = true,
     bool run_gci = true,
-    double grid_spacing = 0.5,
-    double grid_sigma = 1.4,
+    double grid_spacing = 0.375,
+    double smoothing_sigma = 0.7,
     double peak_percentile = 90.0,
-    double peak_merge_cutoff = 1.4,
+    double min_site_separation = 2.5,
     bool capacity_filter = true,
     double max_capacity_hit_fraction = 0.01,
     double max_mean_capacity_fraction = 0.90,
@@ -233,9 +233,9 @@ py::dict run_mcswell_and_analyze_py(
     cfg.box_center = box_center;
     cfg.box_halfsize = box_halfsize;
     cfg.grid_spacing = grid_spacing;
-    cfg.grid_sigma = grid_sigma;
+    cfg.smoothing_sigma = smoothing_sigma;
     cfg.peak_percentile = peak_percentile;
-    cfg.peak_merge_cutoff = peak_merge_cutoff;
+    cfg.min_site_separation = min_site_separation;
     cfg.capacity_filter = capacity_filter;
     cfg.max_capacity_hit_fraction = max_capacity_hit_fraction;
     cfg.max_mean_capacity_fraction = max_mean_capacity_fraction;
@@ -398,10 +398,10 @@ PYBIND11_MODULE(_mcswell_cpp, m) {
       py::arg("box_halfsize"),
       py::arg("run_binomial") = true,
       py::arg("run_gci") = true,
-      py::arg("grid_spacing") = 0.5,
-      py::arg("grid_sigma") = 1.4,
+      py::arg("grid_spacing") = 0.375,
+      py::arg("smoothing_sigma") = 0.7,
       py::arg("peak_percentile") = 90.0,
-      py::arg("peak_merge_cutoff") = 1.4,
+      py::arg("min_site_separation") = 2.5,
       py::arg("capacity_filter") = true,
       py::arg("max_capacity_hit_fraction") = 0.01,
       py::arg("max_mean_capacity_fraction") = 0.90,
