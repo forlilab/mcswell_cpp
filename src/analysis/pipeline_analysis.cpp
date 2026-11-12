@@ -97,21 +97,23 @@ std::size_t argmin_abs_diff(const std::vector<double>& values, double target) {
     return best;
 }
 
-std::vector<Peak> detect_sites(
+DensityGrid smoothed_density(
     const std::vector<std::array<double, 3>>& density_points, const PostAnalysisConfig& cfg) {
+    if (!(cfg.grid_spacing > 0.0)) throw std::invalid_argument("grid_spacing must be > 0");
+    if (!(cfg.smoothing_sigma > 0.0)) throw std::invalid_argument("smoothing_sigma must be > 0");
     const auto edges = make_edges(cfg.box_center, cfg.box_halfsize, cfg.grid_spacing);
     const auto grid = compute_density_grid(density_points, edges);
-    const auto smoothed = gaussian_smooth(grid, cfg.grid_sigma);
-    const auto raw_peaks = find_peaks(smoothed, cfg.peak_percentile, 1);
-    return merge_close_sites(raw_peaks, cfg.peak_merge_cutoff);
+    return gaussian_smooth(grid, cfg.smoothing_sigma / cfg.grid_spacing); // sigma in voxels
+}
+
+std::vector<Peak> detect_sites(
+    const std::vector<std::array<double, 3>>& density_points, const PostAnalysisConfig& cfg) {
+    return find_hydration_sites(smoothed_density(density_points, cfg), cfg.peak_percentile, cfg.min_site_separation);
 }
 
 void write_density_map(
     const std::vector<std::array<double, 3>>& density_points, const PostAnalysisConfig& cfg, const std::string& path) {
-    const auto edges = make_edges(cfg.box_center, cfg.box_halfsize, cfg.grid_spacing);
-    const auto grid = compute_density_grid(density_points, edges);
-    const auto smoothed = gaussian_smooth(grid, cfg.grid_sigma);
-    density_to_dx(smoothed, path);
+    density_to_dx(smoothed_density(density_points, cfg), path);
 }
 
 } // namespace
@@ -336,6 +338,10 @@ std::string run_binomial_analysis(
         .add("bulk_mu_kcal_mol", cfg.mu_bulk)
         .add("assignment_cutoff_A", cfg.assignment_cutoff)
         .add("peak_percentile", cfg.peak_percentile)
+        .add("site_finder", std::string("greedy density, min separation"))
+        .add("grid_spacing_A", cfg.grid_spacing)
+        .add("smoothing_sigma_A", cfg.smoothing_sigma)
+        .add("min_site_separation_A", cfg.min_site_separation)
         .add("sampler_volume_A3", sampler_volume)
         .add("n_insertion_points", static_cast<long long>(n_insertion_points))
         .add("max_waters", static_cast<long long>(water_capacity))  // 0 = unlimited
@@ -683,6 +689,10 @@ std::string run_gci_analysis(
         .add("n_gci_valid_mu_windows", static_cast<long long>(n_valid))
         .add("nearest_bulk_mu_kcal_mol", mu_values[mu_eq_idx])
         .add("peak_percentile", cfg.peak_percentile)
+        .add("site_finder", std::string("greedy density, min separation"))
+        .add("grid_spacing_A", cfg.grid_spacing)
+        .add("smoothing_sigma_A", cfg.smoothing_sigma)
+        .add("min_site_separation_A", cfg.min_site_separation)
         .add("local_radius_A", cfg.local_radius)
         .add("local_volume_mode", cfg.local_volume_mode)
         .add("local_analysis_volume_A3", local_analysis_volume)

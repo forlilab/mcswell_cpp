@@ -45,10 +45,15 @@ struct PostAnalysisConfig {
     // Density-grid / site detection (shared by both analyses).
     std::array<double, 3> box_center{};
     std::array<double, 3> box_halfsize{};
-    double grid_spacing = 0.5;
-    double grid_sigma = 1.4;
+    // Density grid (A) and its Gaussian smoothing width (A, not voxels, so
+    // changing the grid changes only the resolution). 0.7 A is the smoothing
+    // of the earlier 0.5 A grid with sigma = 1.4 voxels.
+    double grid_spacing = 0.375;
+    double smoothing_sigma = 0.7;
     double peak_percentile = 90.0;
-    double peak_merge_cutoff = 1.4;
+    // Sites are kept more than this far apart (A), as in the WaterKit/MD
+    // hydration-site finder (see find_hydration_sites).
+    double min_site_separation = 2.5;
 
     // Capacity-safety filtering (shared). water_capacity is the hard limit the
     // sampler enforced on the water count (its max_waters); 0 means it had

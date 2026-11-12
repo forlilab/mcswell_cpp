@@ -17,15 +17,10 @@
 
 #include "analysis/density_grid.hpp"
 
-#include "analysis/kdtree.hpp"
-
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
-#include <unordered_map>
 
 namespace mcswell::analysis {
 
@@ -68,10 +63,6 @@ long long reflect_index(long long i, long long n) {
     if (m < 0) m += period;
     return (m < n) ? m : (period - 1 - m);
 }
-
-// scipy.ndimage.maximum_filter's mode='nearest': out-of-range neighbors
-// clamp to the nearest valid index (edge value repeats).
-long long clamp_index(long long i, long long n) { return i < 0 ? 0 : (i >= n ? n - 1 : i); }
 
 std::vector<double> gaussian_kernel1d(double sigma) {
     const int radius = static_cast<int>(4.0 * sigma + 0.5); // scipy: int(truncate*sigma + 0.5), truncate=4.0
@@ -175,7 +166,9 @@ DensityGrid gaussian_smooth(const DensityGrid& grid, double sigma) {
     return out;
 }
 
-std::vector<Peak> find_peaks(const DensityGrid& smoothed, double percentile, int neighborhood) {
+std::vector<Peak> find_hydration_sites(const DensityGrid& smoothed, double percentile, double min_separation) {
+    if (!(min_separation > 0.0)) throw std::invalid_argument("min_separation must be > 0");
+
     std::vector<double> nonzero;
     nonzero.reserve(smoothed.values.size());
     for (double v : smoothed.values) {
@@ -184,132 +177,65 @@ std::vector<Peak> find_peaks(const DensityGrid& smoothed, double percentile, int
     if (nonzero.empty()) {
         throw std::runtime_error("No non-zero density in smoothed grid.");
     }
+    const double threshold = percentile_linear(std::move(nonzero), percentile);
 
-    const double threshold = percentile_linear(nonzero, percentile);
-
-    std::vector<double> masked(smoothed.values.size());
+    // Candidates, densest first; equal densities in voxel-index order.
+    std::vector<std::size_t> order;
     for (std::size_t idx = 0; idx < smoothed.values.size(); ++idx) {
-        masked[idx] = (smoothed.values[idx] >= threshold) ? smoothed.values[idx] : 0.0;
+        if (smoothed.values[idx] > 0.0 && smoothed.values[idx] >= threshold) order.push_back(idx);
+    }
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return smoothed.values[a] > smoothed.values[b];
+    });
+
+    // Voxel centres per axis, and how many voxels the exclusion sphere can
+    // span along each axis (bins may be slightly narrower than the nominal
+    // spacing, see make_edges, so use the narrowest one).
+    std::array<std::vector<double>, 3> centers;
+    std::array<long long, 3> reach{};
+    std::array<long long, 3> n{};
+    for (std::size_t d = 0; d < 3; ++d) {
+        const auto& e = smoothed.edges[d];
+        n[d] = static_cast<long long>(smoothed.shape[d]);
+        centers[d].resize(smoothed.shape[d]);
+        double min_width = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < smoothed.shape[d]; ++i) {
+            centers[d][i] = 0.5 * (e[i] + e[i + 1]);
+            min_width = std::min(min_width, e[i + 1] - e[i]);
+        }
+        reach[d] = static_cast<long long>(std::ceil(min_separation / min_width));
     }
 
-    const auto nx = static_cast<long long>(smoothed.shape[0]);
-    const auto ny = static_cast<long long>(smoothed.shape[1]);
-    const auto nz = static_cast<long long>(smoothed.shape[2]);
-    const auto nb = static_cast<long long>(neighborhood);
+    const double sep2 = min_separation * min_separation;
+    const auto nyz = n[1] * n[2];
+    std::vector<char> excluded(smoothed.values.size(), 0);
+    std::vector<Peak> sites;
+    for (std::size_t idx : order) {
+        if (excluded[idx]) continue;
+        const long long i = static_cast<long long>(idx) / nyz;
+        const long long j = (static_cast<long long>(idx) / n[2]) % n[1];
+        const long long k = static_cast<long long>(idx) % n[2];
 
-    std::vector<Peak> peaks;
-    for (long long i = 0; i < nx; ++i) {
-        for (long long j = 0; j < ny; ++j) {
-            for (long long k = 0; k < nz; ++k) {
-                const double center_val =
-                    masked[smoothed.index(static_cast<std::size_t>(i), static_cast<std::size_t>(j), static_cast<std::size_t>(k))];
-                if (center_val <= 0.0) continue;
+        Peak p;
+        p.center = {centers[0][static_cast<std::size_t>(i)], centers[1][static_cast<std::size_t>(j)],
+                    centers[2][static_cast<std::size_t>(k)]};
+        p.score = smoothed.values[idx];
+        sites.push_back(p);
 
-                double max_val = -std::numeric_limits<double>::infinity();
-                for (long long di = -nb; di <= nb; ++di) {
-                    for (long long dj = -nb; dj <= nb; ++dj) {
-                        for (long long dk = -nb; dk <= nb; ++dk) {
-                            const long long ii = clamp_index(i + di, nx);
-                            const long long jj = clamp_index(j + dj, ny);
-                            const long long kk = clamp_index(k + dk, nz);
-                            max_val = std::max(
-                                max_val,
-                                masked[smoothed.index(
-                                    static_cast<std::size_t>(ii), static_cast<std::size_t>(jj),
-                                    static_cast<std::size_t>(kk))]);
-                        }
+        for (long long ii = std::max(0LL, i - reach[0]); ii <= std::min(n[0] - 1, i + reach[0]); ++ii) {
+            const double dx = centers[0][static_cast<std::size_t>(ii)] - p.center[0];
+            for (long long jj = std::max(0LL, j - reach[1]); jj <= std::min(n[1] - 1, j + reach[1]); ++jj) {
+                const double dy = centers[1][static_cast<std::size_t>(jj)] - p.center[1];
+                for (long long kk = std::max(0LL, k - reach[2]); kk <= std::min(n[2] - 1, k + reach[2]); ++kk) {
+                    const double dz = centers[2][static_cast<std::size_t>(kk)] - p.center[2];
+                    if (dx * dx + dy * dy + dz * dz <= sep2) {
+                        excluded[static_cast<std::size_t>(ii * nyz + jj * n[2] + kk)] = 1;
                     }
                 }
-
-                if (center_val == max_val) {
-                    Peak p;
-                    p.center = {
-                        0.5 * (smoothed.edges[0][static_cast<std::size_t>(i)] +
-                               smoothed.edges[0][static_cast<std::size_t>(i) + 1]),
-                        0.5 * (smoothed.edges[1][static_cast<std::size_t>(j)] +
-                               smoothed.edges[1][static_cast<std::size_t>(j) + 1]),
-                        0.5 * (smoothed.edges[2][static_cast<std::size_t>(k)] +
-                               smoothed.edges[2][static_cast<std::size_t>(k) + 1]),
-                    };
-                    // Score is the *unmasked* smoothed density, matching the
-                    // Python implementation (H_smooth, not H_masked).
-                    p.score = smoothed.values[smoothed.index(
-                        static_cast<std::size_t>(i), static_cast<std::size_t>(j), static_cast<std::size_t>(k))];
-                    peaks.push_back(p);
-                }
             }
         }
     }
-    return peaks;
-}
-
-std::vector<Peak> merge_close_sites(const std::vector<Peak>& peaks, double cutoff) {
-    if (peaks.empty()) return {};
-
-    std::vector<std::array<double, 3>> centers;
-    centers.reserve(peaks.size());
-    for (const auto& p : peaks) centers.push_back(p.center);
-
-    KDTree3D tree(centers);
-    const auto pairs = tree.radius_pairs(cutoff);
-
-    std::vector<std::size_t> parent(peaks.size());
-    std::iota(parent.begin(), parent.end(), 0);
-
-    std::function<std::size_t(std::size_t)> find = [&](std::size_t i) -> std::size_t {
-        while (parent[i] != i) {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        return i;
-    };
-
-    for (const auto& pr : pairs) {
-        const std::size_t ri = find(pr.first);
-        const std::size_t rj = find(pr.second);
-        if (ri != rj) parent[rj] = ri;
-    }
-
-    std::unordered_map<std::size_t, std::vector<std::size_t>> groups;
-    for (std::size_t i = 0; i < peaks.size(); ++i) groups[find(i)].push_back(i);
-
-    std::vector<Peak> merged;
-    merged.reserve(groups.size());
-    for (const auto& [root, idxs] : groups) {
-        (void)root;
-        double total_weight = 0.0;
-        std::array<double, 3> weighted_center{0.0, 0.0, 0.0};
-        for (std::size_t idx : idxs) {
-            total_weight += peaks[idx].score;
-            for (int d = 0; d < 3; ++d) {
-                weighted_center[static_cast<std::size_t>(d)] +=
-                    peaks[idx].center[static_cast<std::size_t>(d)] * peaks[idx].score;
-            }
-        }
-
-        Peak m;
-        if (total_weight > 0.0) {
-            for (int d = 0; d < 3; ++d) {
-                m.center[static_cast<std::size_t>(d)] = weighted_center[static_cast<std::size_t>(d)] / total_weight;
-            }
-        } else {
-            // Degenerate (all-zero-score cluster): fall back to an
-            // unweighted mean rather than dividing by zero.
-            std::array<double, 3> mean_center{0.0, 0.0, 0.0};
-            for (std::size_t idx : idxs) {
-                for (int d = 0; d < 3; ++d) {
-                    mean_center[static_cast<std::size_t>(d)] += peaks[idx].center[static_cast<std::size_t>(d)];
-                }
-            }
-            for (int d = 0; d < 3; ++d) {
-                m.center[static_cast<std::size_t>(d)] =
-                    mean_center[static_cast<std::size_t>(d)] / static_cast<double>(idxs.size());
-            }
-        }
-        m.score = total_weight;
-        merged.push_back(m);
-    }
-    return merged;
+    return sites;
 }
 
 } // namespace mcswell::analysis

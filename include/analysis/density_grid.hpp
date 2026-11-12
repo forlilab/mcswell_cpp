@@ -62,16 +62,17 @@ struct Peak {
     double score = 0.0;
 };
 
-// Local-maxima peak detection: threshold the smoothed grid at the given
-// percentile of its non-zero values (numpy.percentile, linear
-// interpolation), then keep voxels equal to the max of their
-// (2*neighborhood+1)^3 neighborhood (scipy.ndimage.maximum_filter,
-// mode='nearest': out-of-range neighbors clamp to the nearest valid index).
-std::vector<Peak> find_peaks(const DensityGrid& smoothed, double percentile, int neighborhood = 1);
-
-// Union-find merge of peaks whose pairwise distance is at most `cutoff`,
-// replacing each cluster with its score-weighted centroid and the sum of
-// its members' scores.
-std::vector<Peak> merge_close_sites(const std::vector<Peak>& peaks, double cutoff);
+// Hydration-site finder: the greedy procedure of WaterKit's HydrationSites,
+// which also built the MD/GIST reference sites MCSwell is benchmarked on.
+// Voxels whose smoothed density is at or above the given percentile of the
+// non-zero values (numpy.percentile, linear interpolation) are candidates.
+// The densest remaining candidate becomes a site, every candidate within
+// `min_separation` (inclusive) of it is discarded, and this repeats until
+// none is left. Sites are therefore voxel centres more than `min_separation`
+// apart, so they can be placed as explicit waters without clashes. A site's
+// score is the smoothed density at its voxel. Equal densities go to the
+// lower voxel index, so the result is deterministic. Returned in decreasing
+// score.
+std::vector<Peak> find_hydration_sites(const DensityGrid& smoothed, double percentile, double min_separation);
 
 } // namespace mcswell::analysis
