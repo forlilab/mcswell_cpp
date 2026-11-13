@@ -30,6 +30,11 @@ start=-38.0
 stop=-4.0
 step=1.0
 
+[electrostatics]
+# Electronic continuum correction: charges of charged groups x 0.75 (the default).
+# 1.0 uses the force-field charges.
+charge_scaling=0.75
+
 [gci]
 peak_percentile=90.0
 

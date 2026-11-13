@@ -33,6 +33,7 @@ import tomllib
 import estimate_free_energies as fe
 import estimate_free_energies_GCI as fe_gci
 import plot_acceptance
+import charge_scaling
 from rdkit import Chem
 from rdkit.Chem import SDMolSupplier
 from openmm.app import *
@@ -495,8 +496,48 @@ def load_prepared_system(path, inputs):
     return atoms, data["cleaned_pdb"]
 
 
+def resolve_charge_scaling(config, override=None):
+    """Charge scaling factor: the CLI override, else [electrostatics] charge_scaling, else 0.75."""
+    factor = override
+    if factor is None:
+        factor = config.get("electrostatics", {}).get("charge_scaling", charge_scaling.DEFAULT_CHARGE_SCALING)
+    factor = float(factor)
+    if not 0.0 < factor <= 1.0:
+        raise ValueError(f"electrostatics.charge_scaling must be in (0, 1], not {factor}")
+    return factor
+
+
+def apply_charge_scaling(atoms, factor, project_path=None):
+    """Scale the charges of the charged groups of the receptor and ligand atoms (ECC).
+
+    Returns new atoms; the prepared system on disk keeps the force-field charges,
+    so one prepared system serves any factor. With a project_path, the scaled
+    residues are listed in <project_path>/charge_scaling.csv.
+    """
+    if factor == 1.0:
+        print("Charge scaling off (electrostatics.charge_scaling = 1.0): force-field charges")
+        return atoms
+    new_q, report = charge_scaling.scale_charges([a.atom_id for a in atoms], [a.atom_type for a in atoms],
+                                                 [list(a.coords) for a in atoms], [a.charge for a in atoms],
+                                                 factor)
+    scaled = [mc.Atom(a.atom_type, a.atom_id, list(a.coords), a.rmin_half, a.epsilon, float(q))
+              for a, q in zip(atoms, new_q)]
+    before, after = sum(a.charge for a in atoms), float(np.sum(new_q))
+    n_groups = sum(r["n_groups"] for r in report)
+    print(f"Charge scaling (ECC) x {factor:g}: {n_groups} charged groups in {len(report)} residues "
+          f"(net charge {before:+.2f} -> {after:+.2f})")
+    if project_path is not None:
+        with open(f"{project_path}/charge_scaling.csv", "w") as fo:
+            fo.write(f"# charge scaling factor {factor:g}\n")
+            fo.write("residue,formal_charge,n_groups,charge_before,charge_after\n")
+            for r in report:
+                fo.write(f"{r['residue']},{r['formal_charge']},{r['n_groups']},"
+                         f"{r['charge_before']:.4f},{r['charge_after']:.4f}\n")
+    return scaled
+
+
 def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_method="both",
-                minimize=None, openmm_platform=None, prepare_only=False):
+                minimize=None, openmm_platform=None, prepare_only=False, charge_scaling_factor=None):
     #io
     # project_path = config["io"]["save_path"]
     # Parametrized receptor + ligand, prepared once (--prepare-only) and shared
@@ -624,6 +665,13 @@ def run_mcswell(config, project_path, n_gcmc_steps=None, energy_estimation_metho
                                  {"receptor": receptor_path, "ligand": small_molecule_path})
             print(f"Wrote the prepared system ({len(parametrized_atoms)} atoms) to {prepared_system}")
             return None
+
+    # Electronic continuum correction, on by default (0.75). Applied after the
+    # prep, so the prepared system keeps the force-field charges, and before the
+    # fixed waters, which are never scaled.
+    parametrized_atoms = apply_charge_scaling(parametrized_atoms,
+                                              resolve_charge_scaling(config, charge_scaling_factor),
+                                              project_path)
 
     if fixed_waters:
         water_atoms = load_fixed_waters(fixed_waters)
@@ -775,6 +823,18 @@ def build_parser():
             f"(default: {DEFAULT_OPENMM_PLATFORM})."
         ),
     )
+    parser.add_argument(
+        "--charge-scaling",
+        dest="charge_scaling",
+        type=float,
+        default=None,
+        help=(
+            "Factor applied to the charges of the charged groups of the receptor "
+            "and ligand (electronic continuum correction); 1.0 uses the force-field "
+            "charges. Overrides [electrostatics] charge_scaling in the config "
+            f"(default: {charge_scaling.DEFAULT_CHARGE_SCALING})."
+        ),
+    )
     return parser
 
 
@@ -788,7 +848,7 @@ if __name__ == "__main__":
     run_info = run_mcswell(
         config, project_path_base, energy_estimation_method=args.energy_estimation_method,
         minimize=args.minimize, openmm_platform=args.openmm_platform,
-        prepare_only=args.prepare_only,
+        prepare_only=args.prepare_only, charge_scaling_factor=args.charge_scaling,
     )
     if args.prepare_only:
         raise SystemExit(0)

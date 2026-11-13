@@ -379,6 +379,33 @@ Minimization is off by default: input structures are assumed to be already
 equilibrated. Both keys can be overridden per-run from the command line with
 `--minimize`/`--no-minimize` and `--openmm-platform`.
 
+### `[electrostatics]` (optional)
+
+| Key | Req | Type | Constraints | Example |
+|-----|:---:|------|-------------|---------|
+| `electrostatics.charge_scaling` |  | float | in (0, 1]; default `0.75` | `0.75` |
+
+Fixed-charge force fields lack electronic polarization, which screens the
+interactions between charged groups. MCSwell includes it in a mean-field way
+with the electronic continuum correction (ECC): the charges of every formally
+charged group of the receptor and ligand (carboxylates, sulfonates and
+phosphates, ammonium, guanidinium, amidinium and protonated imidazole groups)
+are multiplied by `charge_scaling`, and the other atoms of the same residue
+absorb the remainder, so each residue ends at `charge_scaling` times its
+formal charge. Charged residues without such a group, such as metal ions, are
+scaled as a whole. Neutral groups, fixed waters and the sampled water are not
+scaled. The default, 0.75, is 1/sqrt(eps_el) with eps_el ~ 1.78 the electronic
+dielectric constant of water (Leontyev & Stuchebrukhov, *Phys. Chem. Chem.
+Phys.* 2011, 13, 2613; the prosECCo75 force field, Nencini et al., *J. Chem.
+Theory Comput.* 2024, 20, 7546). On the RETI hydration free-energy benchmark
+it removes the overbinding of waters surrounded by charged groups. `1.0` uses
+the force-field charges.
+
+The scaling is applied after the OpenMM prep, so a prepared system
+(`io.prepared_system`) keeps the force-field charges and serves any factor.
+The scaled residues are listed in `<save_path>/charge_scaling.csv`. Override
+per run with `--charge-scaling`.
+
 ### `[gci]` (optional)
 
 Every key has a default, so the whole section may be omitted.
@@ -456,6 +483,7 @@ Or run the provided example:
 | `--minimize` / `--no-minimize` | from `[openmm]` | Energy-minimize the prepped receptor, or skip it |
 | `--openmm-platform` | from `[openmm]` | Platform for the prep step (`auto`, `CUDA`, `OpenCL`, `CPU`, `Reference`) |
 | `--prepare-only` | off | Only run the OpenMM prep, write it to `io.prepared_system`, and stop |
+| `--charge-scaling` | from `[electrostatics]`, else `0.75` | Factor for the charges of charged groups (ECC); `1.0` uses the force-field charges |
 
 By default a run performs the GCMC titration and both free-energy
 post-processing methods (ProtoMS-style GCI and the independent-site binomial
@@ -476,6 +504,7 @@ writes only the final result artifacts:
 ```
 <save_path>/
   box.pdb, system_cleaned.pdb        # pre-simulation setup, from OpenMM
+  charge_scaling.csv                 # residues whose charges were scaled (ECC)
   acceptance_summary.csv             # sampling diagnostics, per (mu, phase)
   acceptance_windows.csv             # sampling diagnostics, per (mu, window)
   acceptance_by_mu.png               # production acceptance rate per move vs mu
